@@ -55,10 +55,10 @@ function Runs({ runs }) {
                   : r.backend === "cloud" ? <span className="badge cloud">cloud</span>
                   : <span className="badge local">local</span>}
               </td>
-              <td>{r.confidence != null ? r.confidence.toFixed(2) : "—"}</td>
+              <td>{r.confidence != null ? Number(r.confidence).toFixed(2) : "—"}</td>
               <td>{r.entity_count ?? 0}</td>
               <td className="muted">{r.new_count ?? 0}/{r.updated_count ?? 0}/{r.stale_count ?? 0}</td>
-              <td>${(r.cost_usd ?? 0).toFixed(4)}</td>
+              <td>${Number(r.cost_usd ?? 0).toFixed(4)}</td>
             </tr>
           ))}
         </tbody>
@@ -98,7 +98,7 @@ function Entities({ sourceId, entities }) {
             <tr key={e.id}>
               <td>{e.id}</td>
               {fields.map((f) => <td key={f}>{String(e.data?.[f] ?? "")}</td>)}
-              <td>{e.confidence?.toFixed(2)}</td>
+              <td>{e.confidence != null ? Number(e.confidence).toFixed(2) : "—"}</td>
               <td>{fmt(e.last_seen)}</td>
               <td>{e.stale ? <span className="badge err">stale</span> : <span className="badge local">live</span>}</td>
             </tr>
