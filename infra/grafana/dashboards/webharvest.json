@@ -1,0 +1,99 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Fetches/min by outcome",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "sum by(outcome) (rate(webharvest_scraper_fetch_total[5m]) * 60)", "legendFormat": "{{outcome}}", "refId": "A" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area" }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Entities by change type",
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 0 },
+      "targets": [
+        { "expr": "sum by(change) (rate(webharvest_scraper_run_entities_total[5m]))", "legendFormat": "{{change}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Confidence distribution (avg by backend)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum by(le, backend) (rate(webharvest_scraper_run_confidence_bucket[5m])))", "legendFormat": "p50 {{backend}}", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum by(le, backend) (rate(webharvest_scraper_run_confidence_bucket[5m])))", "legendFormat": "p95 {{backend}}", "refId": "B" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Cost per source (USD/hour)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        { "expr": "sum by(source_id) (rate(webharvest_scraper_cost_usd_total[1h]) * 3600)", "legendFormat": "src {{source_id}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Fetch duration (p95)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by(le, source_id) (rate(webharvest_scraper_fetch_duration_seconds_bucket[5m])))", "legendFormat": "src {{source_id}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Cloud escalation rate",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        { "expr": "rate(webharvest_scraper_escalations_total[5m])", "legendFormat": "src {{source_id}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Extracto tokens/sec",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "targets": [
+        { "expr": "sum by(kind) (rate(extracto_tokens_total[5m]))", "legendFormat": "{{kind}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Extract latency (p50/p95)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum by(le) (rate(extracto_extract_duration_seconds_bucket[5m])))", "legendFormat": "p50 cloud", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum by(le) (rate(extracto_extract_duration_seconds_bucket[5m])))", "legendFormat": "p95 cloud", "refId": "B" },
+        { "expr": "histogram_quantile(0.5, sum by(le) (rate(local_model_extract_duration_seconds_bucket[5m])))", "legendFormat": "p50 local", "refId": "C" },
+        { "expr": "histogram_quantile(0.95, sum by(le) (rate(local_model_extract_duration_seconds_bucket[5m])))", "legendFormat": "p95 local", "refId": "D" }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["webharvest"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "WebHarvest",
+  "uid": "webharvest",
+  "version": 1,
+  "weekStart": ""
+}

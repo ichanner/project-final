@@ -1,0 +1,84 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-webharvest}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-webharvest}
+      POSTGRES_DB: ${POSTGRES_DB:-webharvest}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-webharvest}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  local-model:
+    build: ./services/local-model
+    restart: unless-stopped
+    expose: ["8082"]
+
+  extracto:
+    build: ./services/extracto
+    restart: unless-stopped
+    environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      EXTRACTO_MODEL: ${EXTRACTO_MODEL:-anthropic/claude-sonnet-4}
+    expose: ["8081"]
+
+  scraper:
+    build: ./services/scraper
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      extracto: { condition: service_started }
+      local-model: { condition: service_started }
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-webharvest}:${POSTGRES_PASSWORD:-webharvest}@postgres:5432/${POSTGRES_DB:-webharvest}
+      EXTRACTO_URL: http://extracto:8081
+      LOCAL_MODEL_URL: http://local-model:8082
+      LOCAL_CONFIDENCE_THRESHOLD: ${LOCAL_CONFIDENCE_THRESHOLD:-0.7}
+      SCRAPER_REFRESH_CRON: ${SCRAPER_REFRESH_CRON:-0 */6 * * *}
+    expose: ["8080"]
+
+  dashboard:
+    build: ./services/dashboard
+    restart: unless-stopped
+    depends_on:
+      scraper: { condition: service_started }
+    ports:
+      - "3000:80"
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    restart: unless-stopped
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    restart: unless-stopped
+    depends_on:
+      prometheus: { condition: service_started }
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  grafana-data:

@@ -1,0 +1,53 @@
+version: 2
+
+updates:
+  # GitHub Actions — keeps both first-party and third-party actions current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor-and-patch:
+        update-types: [minor, patch]
+
+  # Python dependencies (pip).
+  - package-ecosystem: pip
+    directory: /services/scraper
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: pip
+    directory: /services/local-model
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # Node dependencies (npm).
+  - package-ecosystem: npm
+    directory: /services/extracto
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: npm
+    directory: /services/dashboard
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # Docker base images per service.
+  - package-ecosystem: docker
+    directory: /services/scraper
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/extracto
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/local-model
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /services/dashboard
+    schedule:
+      interval: weekly

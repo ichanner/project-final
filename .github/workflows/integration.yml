@@ -1,0 +1,45 @@
+name: Integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    name: docker compose up + end-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bring up the stack with test overlay
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.test.yml \
+            up -d --build --wait
+        env:
+          DOCKER_BUILDKIT: 1
+
+      - name: Print service status
+        run: docker compose ps
+
+      - name: Run integration test
+        run: bash tests/integration/run.sh
+        env:
+          SCRAPER_URL: http://localhost:8080
+          FIXTURE_URL: http://fixture/jsonld.html
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          echo "::group::scraper" && docker compose logs scraper && echo "::endgroup::"
+          echo "::group::extracto" && docker compose logs extracto && echo "::endgroup::"
+          echo "::group::local-model" && docker compose logs local-model && echo "::endgroup::"
+          echo "::group::postgres" && docker compose logs postgres && echo "::endgroup::"
+          echo "::group::fixture" && docker compose logs fixture && echo "::endgroup::"
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.test.yml down -v

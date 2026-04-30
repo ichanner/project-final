@@ -1,0 +1,28 @@
+# Overlay used by integration tests. Adds a static-HTML fixture server and
+# exposes the scraper API on the host. Use:
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build
+services:
+  fixture:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./tests/integration/fixtures:/usr/share/nginx/html:ro
+    expose: ["80"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  scraper:
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres: { condition: service_healthy }
+      extracto: { condition: service_started }
+      local-model: { condition: service_started }
+      fixture: { condition: service_healthy }
+
+  extracto:
+    environment:
+      ANTHROPIC_API_KEY: dummy-not-used-in-integration-test
