@@ -1,0 +1,72 @@
+groups:
+  - name: webharvest
+    interval: 15s
+    rules:
+
+      # Drift detection: a primary run picked up an entity that changed value.
+      # The DevOps analog: a config / status / dependency drifted away from
+      # what we last saw. Fires once per source whenever updated_count goes up.
+      - alert: EntityFieldDrift
+        expr: increase(webharvest_scraper_run_entities_total{change="updated"}[2m]) > 0
+        labels:
+          severity: info
+          component: webharvest
+        annotations:
+          summary: "Source {{ $labels.source_id }} — {{ $value }} entity update(s) detected"
+          description: "A field on a watched entity changed value between runs. Pick the source in the dashboard to see which one drifted."
+
+      # Model disagreement: a challenger's per-field value diverged from the
+      # primary by more than 10%. This is the bake-off's quality signal.
+      - alert: ModelFieldDisagreement
+        expr: webharvest_field_agreement < 0.9
+        for: 30s
+        labels:
+          severity: warning
+          component: webharvest
+        annotations:
+          summary: "{{ $labels.challenger }} disagrees with {{ $labels.primary }} on field '{{ $labels.field }}' (src {{ $labels.source_id }})"
+          description: "Per-field agreement = {{ $value | printf \"%.2f\" }}. The challenger model read {{ $labels.field }} differently from the primary on at least one matched entity. Check the field-agreement matrix panel."
+
+      # Cost surge: spending more than $0.50/hr on a single (source, model)
+      # combination. Adjust the threshold in your real ops, but for demo this
+      # fires reliably if you start running expensive models on big pages.
+      - alert: ExtractoCostSurge
+        expr: rate(extracto_cost_usd_total[5m]) * 3600 > 0.5
+        for: 1m
+        labels:
+          severity: warning
+          component: webharvest
+        annotations:
+          summary: "{{ $labels.model }} cost rate exceeded $0.50/hr"
+          description: "Spending {{ $value | printf \"%.2f\" }} USD/hr on {{ $labels.model }}. Consider switching the source's primary to a cheaper model, or backing off the refresh cadence."
+
+      # Stale spike: a primary run marked many entities stale at once. Means
+      # the page changed shape (region renamed, table redesigned, paginated
+      # differently). Worth a human eye.
+      - alert: StaleEntitySpike
+        expr: increase(webharvest_scraper_run_entities_total{change="stale"}[5m]) >= 5
+        labels:
+          severity: warning
+          component: webharvest
+        annotations:
+          summary: "Source {{ $labels.source_id }} marked {{ $value }} entities stale"
+          description: "Either the page is paginating and we lost a page, or its structure changed. Check the latest snapshot's HTML."
+
+      # Fast-path SLI: hit rate. Healthy sources should run 95%+ of polls
+      # against cached anchors (no LLM cost). When that drops, the page
+      # changed shape and the LLM is being invoked again — alert on
+      # sustained drift so it doesn't quietly burn credits.
+      - alert: FastPathHitRateLow
+        expr: |
+          (
+            sum by(source_id) (rate(webharvest_fast_path_total{outcome="hit"}[10m]))
+            /
+            sum by(source_id) (rate(webharvest_fast_path_total[10m]))
+          ) < 0.7
+        for: 10m
+        labels:
+          severity: warning
+          component: webharvest
+        annotations:
+          summary: "src {{ $labels.source_id }} fast-path hit rate at {{ $value | printf \"%.0f%%\" }}"
+          description: "Cached DOM anchors are failing verification too often — page structure may have changed. Either re-anchor manually or wait for the LLM bake-off to refresh them. Burn rate on credits will increase until resolved."

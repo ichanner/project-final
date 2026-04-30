@@ -70,15 +70,23 @@ Then:
 
 ## Adding a source
 
-A source is a URL plus a primary model and a list of challengers. The primary's output is what your downstream pipeline gets; the challengers exist to keep the primary honest.
+The dashboard at `:3000` has a schema builder: paste a URL, optionally write an anchor description, add fields one at a time (name + type), pick a primary model and any challengers. The first schema field is used as the implicit identity for dedup, so you don't have to think about an `identity_key` separately.
+
+There are three preset buttons (HN, S&P 500, Lobste.rs) that fill the form in one click. Hit **Add and run** to create the source and trigger the first bake-off in one shot.
+
+If you'd rather scripted:
 
 ```sh
 curl -X POST http://localhost:3000/api/sources -H 'Content-Type: application/json' -d '{
   "url": "https://news.ycombinator.com/",
   "label": "HN — bake-off",
-  "identity_key": ["title"],
-  "schema": {"fields": {"title": "string"}},
-  "anchor": "the list of front-page submission titles",
+  "anchor": "the list of front-page submissions with their points and authors",
+  "schema": {"fields": {
+    "title":    {"type": "string"},
+    "points":   {"type": "number"},
+    "user":     {"type": "string"},
+    "comments": {"type": "number"}
+  }},
   "primary_model": "anthropic/claude-sonnet-4",
   "comparison_models": [
     "openai/gpt-4o",
@@ -143,15 +151,17 @@ Per-1M-token pricing (USD), used for cost computation in metrics. Snapshot from 
 
 ## What the dashboard surfaces
 
-The Grafana board at `:3001` is the comparison panel. Worth pointing at:
+The Grafana board at `:3001` is the comparison panel. The flagship is **Field agreement matrix** — a colored grid of (challenger × field) cells showing, for the entities both models saw, how often they actually agreed on each field's value. That's where the cheap models earn or lose your trust.
 
-- **Cost by model (USD/hr)** — what each model is costing you per hour
-- **Spend by model** — running totals; the demo's headline number
-- **Inter-model agreement (Jaccard, vs primary)** — does each challenger agree with the primary's identity-key set? 1.0 = perfect; values around 0.7 mean a model is missing or hallucinating ~30% of entities
+Other panels:
+
+- **Cost by model (USD/hr)** and **Spend by model** — what each model is costing you, per hour and total
+- **Set-level agreement (Jaccard, vs primary)** — did the challenger see the same set of entities as the primary?
+- **Per-field agreement (vs primary)** — time-series view of the same numbers in the matrix
 - **Confidence by backend (p50/p95)** — model-reported confidence, distinct per model
 - **Extraction latency p95 by model** — speed comparison under identical input
-- **Tokens/sec by model** — throughput, decomposed into input vs output
-- **Escalation rate (by model)** — challenger call counts; in bake-off mode every challenger is "escalation" by definition
+- **Tokens/sec by model** — throughput, input vs output
+- **Escalation rate (by model)** — challenger call counts
 - **Entities by change type** — new/updated/stale rates from the primary's diffs
 - **Fetches/min by outcome** — fetch-side success rate per source
 

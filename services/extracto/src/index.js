@@ -17,7 +17,7 @@ app.get("/metrics", async (_req, res) => {
 });
 
 app.post("/extract", async (req, res) => {
-  const { html, schema, anchor, model } = req.body ?? {};
+  const { html, schema, anchor, model, identity_field } = req.body ?? {};
   if (typeof html !== "string" || html.length === 0) {
     return res.status(400).json({ error: "html (string) required" });
   }
@@ -26,7 +26,7 @@ app.post("/extract", async (req, res) => {
   const startedAt = process.hrtime.bigint();
   let outcome = "ok";
   try {
-    const result = await extract({ html, schema, anchor, model: useModel });
+    const result = await extract({ html, schema, anchor, model: useModel, identity_field });
 
     if (result.usage) {
       extractTokens.labels(useModel, "input").inc(result.usage.prompt_tokens ?? 0);

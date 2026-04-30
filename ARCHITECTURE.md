@@ -1,170 +1,142 @@
 # Architecture
 
-A one-page reference for how WebHarvest is wired up. For higher-level intent, see [README.md](./README.md). For per-tool tradeoffs, see [SWOT_ANALYSIS.md](./SWOT_ANALYSIS.md). For comparative measurements between cloud and local extractors, see [EVALUATION.md](./EVALUATION.md).
+This is the long version of what the README sketches in ASCII. It covers the request flow, the multi-model bake-off pattern, what each metric is for, and the trade-offs the design makes.
 
-## 1. Service graph
+## Service graph
 
-```
-                    +-------------+
-                    |  Dashboard  |  :3000
-                    | (React/Vite |
-                    |   + nginx)  |
-                    +------+------+
-                           | /api -> scraper
-                           v
-+----------+         +------------+         +-------------+
-|  Browser | <-----> |  Scraper   | <-----> |  Postgres   |
-+----------+   :80   | (FastAPI)  |   5432  |   16        |
-                     |   :8080    |         +-------------+
-                     +-+--------+-+
-                       |        |
-              local    |        |  cloud
-              path     |        |  path
-                       v        v
-              +-----------+   +-----------+
-              | local-    |   | extracto  |
-              | model     |   | (Node)    |
-              | (FastAPI) |   |           |
-              | :8082     |   | :8081     |
-              +-----------+   +-----+-----+
-                                    |
-                                    v
-                          +-------------------+
-                          | api.anthropic.com |
-                          | (Claude Sonnet)   |
-                          +-------------------+
-
-Observability plane (orthogonal to the data plane):
-
-  scraper:8080/metrics  -+
-  extracto:8081/metrics -+--> Prometheus :9090 --> Grafana :3001
-  local-model:8082/met. -+
-```
-
-Every service exposes both `/health` (liveness) and `/metrics` (Prometheus). Compose `depends_on` uses `condition: service_healthy` so the scraper never starts before Postgres is accepting connections.
-
-## 2. Request flow — one scrape
+Three application services run in containers; Postgres, Prometheus, Grafana sit alongside.
 
 ```
-client                 scraper            local-model        extracto         postgres
-  |  POST /sources/{id}/run  |                  |                |               |
-  | -----------------------> |                  |                |               |
-  |                          | SELECT source    |                |               |
-  |                          | -----------------|----------------|-------------> |
-  |                          | <----------------|----------------|-------------- |
-  |                          | GET url (httpx)  |                |               |
-  |                          |--> external <----|                |               |
-  |                          | INSERT snapshot, run                              |
-  |                          | -----------------|----------------|-------------> |
-  |                          |                  |                |               |
-  |                          | POST /extract    |                |               |
-  |                          | ---------------> |                |               |
-  |                          | <--- {entities, confidence} ----  |               |
-  |                          |                                                   |
-  |          if confidence < LOCAL_CONFIDENCE_THRESHOLD (default 0.7):           |
-  |                          | POST /extract                                     |
-  |                          | --------------------------------> |               |
-  |                          |                                   | Claude API    |
-  |                          |                                   | --> Anthropic |
-  |                          | <--- {entities, confidence, cost_usd} ----        |
-  |                          |                                                   |
-  |                          | for each entity:                                  |
-  |                          |   identity_for(entity, identity_key)              |
-  |                          |   if exists & data differs -> UPDATE              |
-  |                          |   if exists & data same    -> touch last_seen     |
-  |                          |   else                     -> INSERT (new)        |
-  |                          | UPDATE entities SET stale=TRUE                    |
-  |                          |   WHERE last_run_id != run_id                     |
-  |                          | UPDATE runs SET finished_at, counts, cost         |
-  |                          | -----------------|----------------|-------------> |
-  |  {run_id, backend,       |                                                   |
-  |   confidence, counts,    |                                                   |
-  |   cost}                  |                                                   |
-  | <----------------------- |                                                   |
+                                  ┌──────────────────────────────────────────┐
+                                  │                                          │
+                                  │   OpenRouter (https://openrouter.ai/v1)  │
+                                  │                                          │
+                                  │   anthropic/claude-sonnet-4              │
+                                  │   openai/gpt-4o                          │
+                                  │   meta-llama/llama-3.3-70b-instruct      │
+                                  │   google/gemini-2.0-flash-001            │
+                                  │                                          │
+                                  └────────┬─────────────────────────────────┘
+                                           │ HTTPS, OpenAI-compatible API
+                                           │
+   ┌────────────┐    /api    ┌────────────┐│  /extract        ┌────────────┐
+   │ Dashboard  │───────────▶│  Scraper   │┼─────────────────▶│  Extracto  │
+   │ (React)    │            │ (FastAPI)  ││   one call per   │ (Node)     │
+   │ schema     │            │            ││   model in a     │            │
+   │ builder    │            │  fetch &   ││   single snapshot│  Routes by │
+   │            │            │  snapshot  ││                  │  body.model│
+   │            │            │  diff      │                   └─────┬──────┘
+   └─────┬──────┘            │  persist   │                         │
+         │ /api/runs         │            │                         │
+         │                   └─────┬──────┘                         │
+         │                         │                                │
+         │       ┌─────────────────┴─────────────────────┐          │
+         │       │                                       │          │
+         │   ┌───▼─────────┐                       ┌─────▼──────────▼───┐
+         │   │  Postgres   │                       │  Prometheus        │
+         │   │             │                       │  (scrapes /metrics)│
+         │   │  sources    │                       │                    │
+         │   │  snapshots  │                       └─────────┬──────────┘
+         │   │  runs       │                                 │
+         │   │  entities   │                            ┌────▼─────┐
+         │   └─────────────┘                            │ Grafana  │
+         │                                              │          │
+         └──────────────────────────────────────────────▶          │
+                              browser links to /grafana/           │
+                                                       └──────────┘
 ```
 
-Things worth noting:
+## The request lifecycle
 
-- HTML is **stored** before extraction. If a schema changes later, the extractor can be re-run on the existing snapshot without re-fetching.
-- Diffing is **identity-keyed**, not content-hashed. Updates carry the entity forward; missing entities are flagged stale, never deleted (could be pagination).
-- The local→cloud escalation is the load-bearing piece of the cost story. Every escalation is counted in `webharvest_scraper_escalations_total`.
+When you POST `/api/sources/{id}/run`:
 
-## 3. Data lifecycle
+1. **Fetch.** Scraper pulls the URL with httpx. One GET, no retries on 429 (could add). Records the status code and HTML byte count as Prometheus metrics. Stores the raw HTML as a row in `snapshots` so schemas can be re-applied without re-fetching.
+2. **Fan-out.** The same HTML is sent to extracto once per model in `[primary_model] + comparison_models`. The fan-out is `asyncio.gather` so the slowest model bounds the run, not the sum.
+3. **Per-model extraction.** Extracto uses the OpenAI SDK pointed at OpenRouter, with `model` set per request. The system prompt and JSON schema are identical across models — the only variable is which model handles the call.
+4. **Parse the response.** OpenRouter providers respect `response_format: json_schema` to varying degrees. Anthropic via Bedrock has historically returned JSON under `"data"` instead of `"entities"`, sometimes wraps in markdown fences, sometimes leads with chain-of-thought prose. Extracto's parser walks JSON.parse → fenced-block extractor → `{...}` substring → tolerant key lookup (`entities` → `data` → `items` → `results` → `rows`). This is the kind of layer you don't want, but it's the price of fan-out across providers with different output discipline.
+5. **Persist run rows.** Each model's call becomes one row in `runs`, all sharing the same `snapshot_id`. The primary row gets `is_primary = TRUE`. Challenger rows get an `agreement` score (Jaccard of identity-keys with the primary's set).
+6. **Diff the primary.** Only the primary's entities go through the diff-and-persist path: lookup `(source_id, identity)`, INSERT/UPDATE/mark-stale. Challenger entities are ephemeral — they live in `runs.entity_count` but never touch the `entities` table.
+7. **Emit metrics.** Per-model histograms for confidence; counters for cost and tokens; gauges for set-level (Jaccard) and per-field agreement-vs-primary.
+
+## Identity, schemas, and the "no identity_key" UX
+
+In 0.2.0 the dashboard's source builder no longer asks for an `identity_key`. The implicit identity for a new source is the value of the **first field declared in the schema**. So if your schema is `{title, points, user, comments}`, the dedup key is `entity.title`. This is enforced in `services/scraper/src/diff.py`'s `identity_for()`, which falls back through:
+
+1. Explicit `identity_key` array (legacy / power users) →
+2. First schema field's value →
+3. JSON-stringified entity (so two literally-identical entities still hash the same)
+
+You can still pass `identity_key` via the API for composite keys (`["company", "filing_date"]`) — the field just isn't surfaced in the UI for the common case.
+
+## What each metric is for
+
+These are the series Grafana groups by.
+
+### Scraper (Python)
+
+| Metric | Type | Labels | What it answers |
+| --- | --- | --- | --- |
+| `webharvest_scraper_fetch_total` | counter | `source_id`, `outcome` | Are pages being fetched? Is anything 404-ing? |
+| `webharvest_scraper_fetch_duration_seconds` | histogram | `source_id` | Per-source fetch latency. Spikes = network issue or site rate-limiting. |
+| `webharvest_scraper_run_entities_total` | counter | `source_id`, `change` ∈ {new, updated, stale} | Diff churn. All-stale on a stable source = the page changed. |
+| `webharvest_scraper_run_confidence` | histogram | `source_id`, `backend` | Model-reported confidence per model. Low p50 = model isn't sure of page structure. |
+| `webharvest_scraper_cost_usd_total` | counter | `source_id`, `backend` | Running USD spend, per model per source. |
+| `webharvest_scraper_escalations_total` | counter | `source_id`, `model` | Challenger call counts. In bake-off mode this is "every challenger run that fired." |
+| `webharvest_agreement_jaccard` | gauge | `source_id`, `primary`, `challenger` | Set-level: did the challenger see the same entities as the primary? |
+| `webharvest_field_agreement` | gauge | `source_id`, `primary`, `challenger`, `field` | Field-level: for matched entities, did each field's value agree? **The dashboard's flagship.** |
+
+### Extracto (Node)
+
+| Metric | Type | Labels | What it answers |
+| --- | --- | --- | --- |
+| `extracto_extract_duration_seconds` | histogram | `model`, `outcome` | Wall-clock per model. The 50× spread between gpt-4o (~4s) and llama-70b (~15s) shows up here. |
+| `extracto_tokens_total` | counter | `model`, `kind` ∈ {input, output} | Token throughput. Cheap-model bias toward longer outputs is visible. |
+| `extracto_cost_usd_total` | counter | `model` | Same number as the scraper-side cost counter, but from the extracto side. |
+
+## Trade-offs the design makes
+
+### Cost vs. comparison value
+
+Running four models on every snapshot multiplies your bill by ~4× the average per-model rate. For HN with rich schema (~12K input tokens, ~100 output tokens per entity × 30 entities) the four-model bake-off costs ~$0.10 per run. For a class project this is fine; for production you'd run challengers as a sample (every Nth run) and let the primary handle the rest.
+
+### Latency
+
+Fan-out is parallel, so the run completes in `max(model_durations)`, not the sum. But that means the slowest model — usually llama-3.3-70b at ~15-25s for HN-sized pages — is the bound. The dashboard surfaces this directly via `extracto_extract_duration_seconds` p95 by model.
+
+### Set-level vs. field-level agreement
+
+Two metrics are recorded for a reason:
+
+- **`webharvest_agreement_jaccard`** (set-level) catches "the cheap model missed 1 of 30 entities" but not "the cheap model got 30 entities and 1 wrong field per entity."
+- **`webharvest_field_agreement`** (field-level) is computed only on entities that *both* models extracted (the intersection, by identity). It surfaces fine-grained disagreement: e.g., "llama and claude both saw 28 of the 30 HN posts, but llama disagreed on `comments` for 4 of them."
+
+Together they answer "who saw what" and "who got the details right" separately, which is what an operator actually wants when picking a model.
+
+### Persistence model
+
+Only the primary's entities make it to the `entities` table. This is deliberate: the user wants one canonical answer, and challenger runs are diagnostic. If a challenger consistently outperforms the primary on a source, you change the primary; you don't blend outputs. (Easy: one column update on `sources.primary_model`.)
+
+### What the heuristic was, and isn't anymore
+
+0.1.0 had a Python heuristic service (BeautifulSoup, JSON-LD parser, table detector) as a "free" first tier — try it, escalate to cloud on low confidence. That worked, but framing it as a comparable tool to a frontier LLM was a category error: the heuristic only handles structured-markup pages, where every cloud model also gets ~100% accuracy. So the comparison was either trivial (both right) or unfair (heuristic can't even attempt). 0.2.0 drops it entirely.
+
+A future version could revive the heuristic as a *ground-truth oracle* — only on pages with valid JSON-LD, only as a check against what the cloud models claim. That's a real comparison and a real metric ("how often does each cloud model agree with the page's own structured data?"). It's not built. The vestigial dir is gone; bringing it back would fit as a third entity source in `runner.py`'s fan-out.
+
+## Where the parts live
 
 ```
-sources    1---*  snapshots   (raw HTML, kept indefinitely)
-   1---*   runs        (one per scrape attempt; FK to snapshot)
-   1---*   entities    (identity-keyed; first_seen/last_seen/stale)
+db/init.sql                          Schema with primary_model + comparison_models
+docker-compose.yml                   Service graph (scraper, extracto, dashboard, postgres, prom, grafana)
+infra/grafana/                       Provisioned datasource + dashboard JSON
+infra/prometheus/prometheus.yml      Scrape config
+services/scraper/src/runner.py       The bake-off fan-out, identity resolution, agreement metrics
+services/scraper/src/main.py         FastAPI surface (sources, runs, entities)
+services/scraper/src/diff.py         identity_for() — schema-first identity resolution
+services/extracto/src/extract.js     Per-model extraction + tolerant JSON parser
+services/extracto/src/anthropicClient.js   OpenRouter client + per-model pricing
+services/dashboard/src/App.jsx       Schema builder UI + snapshot-grouped runs
+.github/workflows/ci.yml             Lint + test + compose-build
+.github/workflows/security.yml       Trivy + audits + secret scan
+.github/workflows/integration.yml    Full stack-up + bake-off on fixtures
+.github/workflows/deploy.yml         Tagged release -> GHCR with SLSA + SBOM
 ```
-
-State transitions for an entity:
-
-```
-   (new)  -- INSERT --> live (first_seen=now, stale=FALSE)
-   live   -- same data, seen again --> live (last_seen bumped)
-   live   -- new data, same identity --> live (data updated, stale=FALSE)
-   live   -- not seen this run -> stale=TRUE (data preserved)
-   stale  -- seen again --> live (stale=FALSE, last_seen bumped)
-```
-
-There is no DELETE path. Disappearing entities go stale in case the disappearance is just pagination flakiness; recovery is automatic.
-
-## 4. CI / security pipeline
-
-```
-        push to PR / main                                  push tag v*
-              |                                                 |
-              v                                                 v
-+----------------------------+                +--------------------------------+
-|  ci.yml                    |                |  deploy.yml                    |
-|  - ruff (scraper, local)   |                |  - docker login ghcr.io        |
-|  - eslint (extracto, dash) |                |  - docker buildx + push        |
-|  - pytest (scraper, local) |                |    each of 4 services to       |
-|  - node --test (extracto)  |                |    ghcr.io/owner/web-harvest-* |
-|  - vite build (dashboard)  |                |  - SBOM + provenance attached  |
-|  - docker compose build    |                |  - GitHub Release with notes   |
-+--------------+-------------+                +--------------------------------+
-               |
-               v
-+----------------------------+
-|  integration.yml           |
-|  - compose up + fixture    |
-|  - hit /health each svc    |
-|  - POST source -> run      |
-|  - assert entity counts    |
-|  - re-run -> assert idemp. |
-+--------------+-------------+
-               |
-               v
-+----------------------------+
-|  security.yml              |
-|  per-service:              |
-|    - pip-audit / npm audit |
-|    - Trivy image scan      |
-|       -> SARIF to code     |
-|          scanning          |
-|       -> CycloneDX SBOM    |
-|          as artifact       |
-|  repo-wide:                |
-|    - Trivy fs scan         |
-|    - gitleaks (secrets)    |
-|  schedule: weekly          |
-+----------------------------+
-```
-
-Three workflows, three concerns. CI gates correctness, integration gates the wiring, security runs continuously and weekly.
-
-## 5. Observability
-
-| Layer        | Source                                       | Where it surfaces                              |
-| ------------ | -------------------------------------------- | ---------------------------------------------- |
-| Per-fetch    | `webharvest_scraper_fetch_total{outcome}`    | "Fetches/min by outcome" stat                  |
-| Per-run      | `webharvest_scraper_run_entities_total{change}` | "Entities by change type" timeseries           |
-| Confidence   | `webharvest_scraper_run_confidence_bucket{backend}` | p50/p95 confidence by backend                  |
-| Cost         | `webharvest_scraper_cost_usd_total{source_id}` | "Cost per source (USD/hour)"                   |
-| Escalation   | `webharvest_scraper_escalations_total`       | "Cloud escalation rate"                        |
-| Latency      | `webharvest_scraper_fetch_duration_seconds_bucket` | p95 fetch duration                             |
-| Cloud detail | `extracto_tokens_total{kind}`                | tokens/sec by kind (input/output/cache)        |
-| Compare      | `extracto_extract_duration_seconds_bucket` + `local_model_extract_duration_seconds_bucket` | p50/p95 latency cloud vs local on one panel    |
-
-Every panel in the spec is provisioned in `infra/grafana/dashboards/webharvest.json` and auto-loaded on Grafana startup.

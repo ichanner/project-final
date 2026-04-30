@@ -32,8 +32,21 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-webharvest}:${POSTGRES_PASSWORD:-webharvest}@postgres:5432/${POSTGRES_DB:-webharvest}
       EXTRACTO_URL: http://extracto:8081
-      SCRAPER_REFRESH_CRON: ${SCRAPER_REFRESH_CRON:-0 */6 * * *}
     expose: ["8080"]
+
+  # Background scheduler — same image as scraper, different entrypoint.
+  # Owns the per-source cron jobs. Reconciles from Postgres every 30s, so
+  # editing a source's cron in the UI propagates without restart.
+  worker:
+    build: ./services/scraper
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      extracto: { condition: service_started }
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-webharvest}:${POSTGRES_PASSWORD:-webharvest}@postgres:5432/${POSTGRES_DB:-webharvest}
+      EXTRACTO_URL: http://extracto:8081
+    command: ["python", "-m", "src.worker"]
 
   dashboard:
     build: ./services/dashboard
@@ -48,6 +61,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
     ports:
       - "9090:9090"

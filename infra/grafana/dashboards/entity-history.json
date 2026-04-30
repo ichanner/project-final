@@ -1,0 +1,81 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Pick an entity (sorted by recent change activity)",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "description": "Click an entity_id below, then paste it into the variable above to see its full per-field timeline.",
+      "targets": [
+        {
+          "rawSql": "SELECT e.id AS \"entity_id\", e.source_id, e.identity, count(c.id) AS \"changes\", max(c.changed_at) AS \"last_change\", e.last_seen AS \"last_seen\", e.stale FROM entities e LEFT JOIN entity_changes c ON c.entity_id = e.id WHERE ($source_id = 0 OR e.source_id = $source_id) GROUP BY e.id, e.source_id, e.identity, e.last_seen, e.stale ORDER BY changes DESC NULLS LAST LIMIT 50",
+          "refId": "A",
+          "format": "table"
+        }
+      ]
+    },
+
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Numeric field history for entity $entity_id",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 10 },
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "description": "One line per numeric field on the entity. Source: entity_changes log. If your fields are non-numeric, this panel will be empty — see the table below instead.",
+      "targets": [
+        {
+          "rawSql": "SELECT changed_at AS \"time\", field AS metric, (new_value #>> '{}')::numeric AS value FROM entity_changes WHERE entity_id = $entity_id AND new_value IS NOT NULL AND jsonb_typeof(new_value) IN ('number','string') AND (new_value #>> '{}') ~ '^-?[0-9]+(\\.[0-9]+)?$' ORDER BY changed_at",
+          "refId": "A",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "spanNulls": true, "showPoints": "always" } } }
+    },
+
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Full change log for entity $entity_id",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 20 },
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT changed_at, field, (old_value #>> '{}') AS old_value, (new_value #>> '{}') AS new_value, run_id FROM entity_changes WHERE entity_id = $entity_id ORDER BY changed_at DESC LIMIT 200",
+          "refId": "A",
+          "format": "table"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["webharvest", "entity"],
+  "templating": {
+    "list": [
+      {
+        "name": "source_id",
+        "type": "textbox",
+        "label": "Source ID (0 = all)",
+        "current": { "value": "0", "text": "0" }
+      },
+      {
+        "name": "entity_id",
+        "type": "textbox",
+        "label": "Entity ID",
+        "current": { "value": "1", "text": "1" }
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "WebHarvest — Entity history",
+  "uid": "webharvest-entity",
+  "version": 1
+}

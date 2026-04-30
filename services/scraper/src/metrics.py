@@ -46,3 +46,33 @@ agreement_jaccard = Gauge(
     "Jaccard agreement on identity-keys between primary and challenger models",
     ["source_id", "primary", "challenger"],
 )
+
+field_agreement = Gauge(
+    "webharvest_field_agreement",
+    "Per-field agreement: fraction of co-extracted entities where this field's "
+    "value equals the primary model's value",
+    ["source_id", "primary", "challenger", "field"],
+)
+
+# Per-field change counter — increments every time an entity's field value
+# changes from one run to the next. Cardinality is bounded by schema field
+# count per source (typically <10).
+field_changes_total = Counter(
+    "webharvest_field_changes_total",
+    "Entity field-value changes detected by the diff",
+    ["source_id", "field"],
+)
+
+# Cached-anchor fast-path metrics. Hit = BS4 produced valid entities, no LLM
+# called. Miss = anchors invalid (or absent) — fell back to LLM bake-off.
+fast_path_total = Counter(
+    "webharvest_fast_path_total",
+    "Fast-path attempts using cached DOM anchors (no LLM called)",
+    ["source_id", "outcome"],  # outcome = hit | miss
+)
+fast_path_duration = Histogram(
+    "webharvest_fast_path_duration_seconds",
+    "BeautifulSoup extraction wall-clock for cached-anchor polls",
+    ["source_id"],
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0),
+)

@@ -14,6 +14,11 @@ CREATE TABLE IF NOT EXISTS sources (
     -- not persisted). Both are OpenRouter slugs e.g. "openai/gpt-4o".
     primary_model      TEXT,
     comparison_models  TEXT[] NOT NULL DEFAULT '{}',
+    -- Cached DOM anchoring recipe. The LLM produces this on first run; every
+    -- subsequent poll applies it via BeautifulSoup with no LLM cost. NULL
+    -- means "no anchors yet, next run goes through the LLM."
+    anchors            JSONB,
+    last_anchored_at   TIMESTAMPTZ,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -70,3 +75,20 @@ CREATE TABLE IF NOT EXISTS entities (
 );
 
 CREATE INDEX IF NOT EXISTS entities_source_idx ON entities(source_id, last_seen DESC);
+
+-- Granular change log: one row per (entity, field) value change. Lets us
+-- answer "how has this entity drifted over time?" without re-fetching, and
+-- powers the Grafana Postgres-datasource panels for field-level analysis.
+CREATE TABLE IF NOT EXISTS entity_changes (
+    id          BIGSERIAL PRIMARY KEY,
+    entity_id   BIGINT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    source_id   BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    run_id      BIGINT REFERENCES runs(id) ON DELETE SET NULL,
+    field       TEXT NOT NULL,
+    old_value   JSONB,
+    new_value   JSONB,
+    changed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS entity_changes_entity_idx ON entity_changes(entity_id, changed_at DESC);
+CREATE INDEX IF NOT EXISTS entity_changes_source_field_idx ON entity_changes(source_id, field, changed_at DESC);

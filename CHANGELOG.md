@@ -18,8 +18,11 @@ The original "local heuristic vs cloud LLM" framing wasn't really a comparison �
 - `sources.primary_model` and `sources.comparison_models[]` columns. Old `sources.model` removed.
 - `runs.is_primary` (BOOL) and `runs.agreement` (Jaccard with primary) columns.
 - `webharvest_agreement_jaccard{source_id, primary, challenger}` Prometheus gauge.
-- New Grafana panels: cost-by-model, escalation-rate-by-model, tokens-by-model, latency-by-model, agreement-vs-primary, total spend, spend-by-model.
-- Dashboard React UI: snapshot-grouped runs table; model dropdown + challenger checkboxes on the source form; per-row "primary" / "challenger" badge; agreement column.
+- `webharvest_field_agreement{source_id, primary, challenger, field}` Prometheus gauge — per-field comparison on entities both models extracted.
+- New Grafana panels: cost-by-model, escalation-rate-by-model, tokens-by-model, latency-by-model, set-level agreement, per-field agreement timeseries, **field agreement matrix** (table panel with colored cells, headline visualization).
+- Dashboard React UI: full schema builder (add/edit/remove fields with type dropdown), preset buttons (HN, S&P 500, Lobste.rs), JSON preview, model dropdown + challenger checkboxes, "Add and run" one-shot button, snapshot-grouped runs table.
+- `identity_key` is now optional in the API; the implicit identity for an entity is the value of the first declared schema field.
+- Tolerant JSON parser in extracto: accepts `entities`, `data`, `items`, `results`, or `rows` as the array key — Bedrock-served Claude often emits `data` instead of `entities` regardless of the strict schema directive.
 - Four supported model slugs with per-model pricing in `extracto/src/anthropicClient.js`: `anthropic/claude-sonnet-4`, `openai/gpt-4o`, `meta-llama/llama-3.3-70b-instruct`, `google/gemini-2.0-flash-001`.
 
 ### Changed

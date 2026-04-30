@@ -1,35 +1,36 @@
 const BASE = "/api";
 
-export async function listSources() {
-  const r = await fetch(`${BASE}/sources`);
-  if (!r.ok) throw new Error(`sources: ${r.status}`);
+async function jsonFetch(url, init) {
+  const r = await fetch(url, init);
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json())?.detail || ""; } catch { /* ignore */ }
+    throw new Error(`${url}: ${r.status}${detail ? " — " + detail : ""}`);
+  }
   return r.json();
 }
 
-export async function listRuns() {
-  const r = await fetch(`${BASE}/runs`);
-  if (!r.ok) throw new Error(`runs: ${r.status}`);
-  return r.json();
-}
+export const listSources    = ()         => jsonFetch(`${BASE}/sources`);
+export const listRuns       = ()         => jsonFetch(`${BASE}/runs`);
+export const listEntities   = (sid)      => jsonFetch(`${BASE}/sources/${sid}/entities`);
+export const triggerRun     = (sid)      => jsonFetch(`${BASE}/sources/${sid}/run`, { method: "POST" });
+export const sourceChanges  = (sid)      => jsonFetch(`${BASE}/sources/${sid}/changes`);
+export const entityHistory  = (sid, eid) => jsonFetch(`${BASE}/sources/${sid}/entities/${eid}/history`);
+export const deleteSource   = (sid)      => jsonFetch(`${BASE}/sources/${sid}`, { method: "DELETE" });
+export const reAnchor       = (sid)      => jsonFetch(`${BASE}/sources/${sid}/re-anchor`, { method: "POST" });
+export const getAnchors     = (sid)      => jsonFetch(`${BASE}/sources/${sid}/anchors`);
+export const getSnapshot    = (sid)      => jsonFetch(`${BASE}/sources/${sid}/snapshot`);
 
-export async function listEntities(sourceId) {
-  const r = await fetch(`${BASE}/sources/${sourceId}/entities`);
-  if (!r.ok) throw new Error(`entities: ${r.status}`);
-  return r.json();
-}
+export const patchSource = (sid, patch) =>
+  jsonFetch(`${BASE}/sources/${sid}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
 
-export async function triggerRun(sourceId) {
-  const r = await fetch(`${BASE}/sources/${sourceId}/run`, { method: "POST" });
-  if (!r.ok) throw new Error(`run: ${r.status}`);
-  return r.json();
-}
-
-export async function createSource(payload) {
-  const r = await fetch(`${BASE}/sources`, {
+export const createSource = (payload) =>
+  jsonFetch(`${BASE}/sources`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (!r.ok) throw new Error(`create: ${r.status}`);
-  return r.json();
-}
