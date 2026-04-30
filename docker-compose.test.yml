@@ -9,7 +9,7 @@ services:
       - ./tests/integration/fixtures:/usr/share/nginx/html:ro
     expose: ["80"]
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      test: ["CMD", "wget", "-qO-", "http://localhost/jsonld.html"]
       interval: 5s
       timeout: 3s
       retries: 10
