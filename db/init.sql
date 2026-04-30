@@ -1,20 +1,21 @@
 -- WebHarvest schema. Loaded on Postgres first run.
 
 CREATE TABLE IF NOT EXISTS sources (
-    id           BIGSERIAL PRIMARY KEY,
-    url          TEXT NOT NULL UNIQUE,
-    label        TEXT,
-    schema       JSONB NOT NULL DEFAULT '{}'::jsonb,
-    anchor       TEXT,
-    identity_key TEXT[] NOT NULL DEFAULT '{}',
-    pagination   JSONB NOT NULL DEFAULT '{}'::jsonb,
-    refresh_cron TEXT,
-    -- Which OpenRouter model this source escalates to when the heuristic
-    -- can't get a confident extraction. NULL falls back to extracto's
-    -- EXTRACTO_DEFAULT_MODEL env var.
-    model        TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    id                 BIGSERIAL PRIMARY KEY,
+    url                TEXT NOT NULL UNIQUE,
+    label              TEXT,
+    schema             JSONB NOT NULL DEFAULT '{}'::jsonb,
+    anchor             TEXT,
+    identity_key       TEXT[] NOT NULL DEFAULT '{}',
+    pagination         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    refresh_cron       TEXT,
+    -- Per source we pick a primary model (its entities are persisted) and
+    -- a list of challenger models (run on the same snapshot for measurement,
+    -- not persisted). Both are OpenRouter slugs e.g. "openai/gpt-4o".
+    primary_model      TEXT,
+    comparison_models  TEXT[] NOT NULL DEFAULT '{}',
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS snapshots (
@@ -29,22 +30,31 @@ CREATE TABLE IF NOT EXISTS snapshots (
 CREATE INDEX IF NOT EXISTS snapshots_source_idx ON snapshots(source_id, fetched_at DESC);
 
 CREATE TABLE IF NOT EXISTS runs (
-    id           BIGSERIAL PRIMARY KEY,
-    source_id    BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-    snapshot_id  BIGINT REFERENCES snapshots(id) ON DELETE SET NULL,
-    started_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    finished_at  TIMESTAMPTZ,
-    backend      TEXT,
-    confidence   REAL,
-    entity_count INT NOT NULL DEFAULT 0,
-    new_count    INT NOT NULL DEFAULT 0,
+    id            BIGSERIAL PRIMARY KEY,
+    source_id     BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    snapshot_id   BIGINT REFERENCES snapshots(id) ON DELETE SET NULL,
+    started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at   TIMESTAMPTZ,
+    -- For multi-model runs: each model's result is a separate row, all
+    -- sharing the same snapshot_id. The primary run is the one whose
+    -- entities make it into the entities table. Challenger runs record
+    -- cost/latency/confidence/entity_count for comparison only.
+    backend       TEXT,            -- the model slug (or "heuristic", legacy)
+    is_primary    BOOLEAN NOT NULL DEFAULT TRUE,
+    confidence    REAL,
+    entity_count  INT NOT NULL DEFAULT 0,
+    new_count     INT NOT NULL DEFAULT 0,
     updated_count INT NOT NULL DEFAULT 0,
-    stale_count  INT NOT NULL DEFAULT 0,
-    cost_usd     NUMERIC(10,6) NOT NULL DEFAULT 0,
-    error        TEXT
+    stale_count   INT NOT NULL DEFAULT 0,
+    cost_usd      NUMERIC(10,6) NOT NULL DEFAULT 0,
+    -- Jaccard agreement of this run's identity-keys with the primary run
+    -- in the same snapshot. NULL on the primary itself.
+    agreement     REAL,
+    error         TEXT
 );
 
 CREATE INDEX IF NOT EXISTS runs_source_idx ON runs(source_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS runs_snapshot_idx ON runs(snapshot_id);
 
 CREATE TABLE IF NOT EXISTS entities (
     id           BIGSERIAL PRIMARY KEY,
@@ -60,4 +70,3 @@ CREATE TABLE IF NOT EXISTS entities (
 );
 
 CREATE INDEX IF NOT EXISTS entities_source_idx ON entities(source_id, last_seen DESC);
-
