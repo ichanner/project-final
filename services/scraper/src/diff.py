@@ -1,4 +1,4 @@
-"""Identity derivation for diffing extracted entities against the DB."""
+"""id derivation for diffing extracted entities against db"""
 
 from __future__ import annotations
 
@@ -11,15 +11,7 @@ def identity_for(
     identity_key: list[str],
     schema_fields: list[str] | None = None,
 ) -> str:
-    """Stable identity string for an entity.
-
-    Resolution order:
-      1. Explicit identity_key (joined with "||"), if provided.
-      2. The first field of the schema, if available — this is the implicit
-         identity used by the new schema-builder UI which doesn't ask the
-         user to pick a key.
-      3. JSON-stringified entity (every field change = new entity).
-    """
+    # stable identity string for an entity
     if identity_key:
         return "||".join(str(entity.get(k, "")).strip() for k in identity_key)
     if schema_fields:

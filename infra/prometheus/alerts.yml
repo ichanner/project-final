@@ -3,10 +3,7 @@ groups:
     interval: 15s
     rules:
 
-      # Drift detection: a primary run picked up an entity whose volatile
-      # field changed value. Anchor-field flicker is filtered out by the
-      # diff logic, so this fires only on real change. No `for:` clause —
-      # we want the first drift event to be loud.
+      # a primary run picked up an entity whose volatile field changed value
       - alert: EntityFieldDrift
         expr: increase(webharvest_scraper_run_entities_total{change="updated"}[2m]) > 0
         labels:
@@ -16,10 +13,7 @@ groups:
           summary: "src {{ $labels.source_id }} — {{ $value | printf \"%.0f\" }} entity field-update(s)"
           description: "A volatile field on a watched entity changed value. Open the React dashboard, click the source, expand the entity row to see what drifted."
 
-      # Stale spike: many entities marked stale at once. Means the page
-      # changed shape (region renamed, table redesigned, paginated
-      # differently, or your CSS-selector recipe broke). Pre-touched series
-      # so the alert is detect-able from the very first event.
+      # many entities marked stale at once. Means the page changed shape
       - alert: StaleEntitySpike
         expr: increase(webharvest_scraper_run_entities_total{change="stale"}[5m]) >= 5
         labels:
@@ -29,10 +23,7 @@ groups:
           summary: "src {{ $labels.source_id }} — {{ $value }} entities marked stale in 5m"
           description: "Either the page is paginating and we lost a page, or its structure changed. Inspect the latest snapshot via the React 'snapshot' button on the source card."
 
-      # Fast-path SLI: hit rate per source. Healthy = 95%+ (most polls
-      # served by cached anchors, no LLM cost). The `> 0` guard prevents
-      # NaN division on cold-start sources where no fast-path runs have
-      # happened yet.
+      # hit rate per source
       - alert: FastPathHitRateLow
         expr: |
           (
@@ -48,12 +39,7 @@ groups:
           summary: "src {{ $labels.source_id }} fast-path hit rate at {{ $value | printf \"%.0f%%\" }}"
           description: "Cached DOM anchors are failing too often. Page may have been redesigned. Click 're-anchor' on the source card to force a fresh LLM bake-off, or inspect the snapshot to see what BS4 saw."
 
-      # Cost surge: $/hr rate exceeded a threshold. With anchored fast-path
-      # the steady state is $0/hr, so any positive rate means an LLM was
-      # called recently — either intentionally (re-anchor) or because the
-      # source has no anchors yet. Threshold is conservative; tune to your
-      # tolerance. Reads BOTH counters (extracto + scraper-side) and OR's
-      # them so it fires even after a container restart cleared one side.
+      # $/hr rate exceeded a threshold with anchored fast-path the steady state is $0/hr
       - alert: ExtractoCostSurge
         expr: |
           (
@@ -71,10 +57,7 @@ groups:
           summary: "{{ $labels.model }}{{ $labels.backend }} burning > $0.50/hr"
           description: "Spending {{ $value | printf \"%.2f\" }} USD/hr. Either a re-anchor cycle is firing repeatedly (selectors broken — see FastPathHitRateLow), or a source was created without a primary anchor and every poll calls the LLM."
 
-      # Fetch is failing on a source. Catches sites that started 403-ing,
-      # CDN challenges, network issues, our IP getting blocked. Distinct
-      # from anchor breakage (which surfaces as FastPathHitRateLow) — this
-      # is upstream-of-extraction.
+      # Fetch is failing on a source
       - alert: SourceFetchFailing
         expr: rate(webharvest_scraper_fetch_total{outcome="error"}[5m]) > 0
         for: 5m
@@ -85,11 +68,7 @@ groups:
           summary: "src {{ $labels.source_id }} fetch failures sustained for 5m"
           description: "{{ $value | printf \"%.2f\" }} errors/sec on fetch. Either the page is down, the site started blocking us, or DNS/network is broken between our scraper and the target host."
 
-      # No fetch activity in 30 minutes. Catches misconfigured cron,
-      # worker crash, or a source whose schedule got cleared and forgotten
-      # about. Pre-touched series (.inc(0) on outcome=ok at run start)
-      # ensures this alert can detect a source that's NEVER fetched too,
-      # not just one that stopped fetching.
+      # No fetch activity in 30 minutes
       - alert: SourceStale
         expr: |
           (time() - max by(source_id) (
@@ -104,10 +83,7 @@ groups:
           summary: "src {{ $labels.source_id }} hasn't fetched in {{ $value | printf \"%.0f\" }}s"
           description: "Source hasn't completed a fetch in 30+ minutes. Check whether the worker container is healthy, the source's refresh_cron is set, and the source still has anchors so the scheduled poll has work to do."
 
-      # Per-entity policy alert fired (Option A). User-defined rules
-      # evaluated on every fast-path poll. This Prom alert is a coarse
-      # "something fired" signal — granular rule details live in the
-      # entity_alerts Postgres table and the React UI.
+      # Per-entity policy alert fired
       - alert: EntityPolicyAlertFired
         expr: increase(webharvest_entity_alerts_fired_total[2m]) > 0
         labels:
@@ -118,12 +94,7 @@ groups:
           summary: "src {{ $labels.source_id }} — policy rule {{ $labels.rule_id }} fired on field {{ $labels.field }}"
           description: "A per-entity policy rule matched. {{ $value | printf \"%.0f\" }} fire(s) in 2m window. See the React 'Active alerts' panel or the entity_alerts Postgres table."
 
-      # Fresh bake-off disagreement. webharvest_field_agreement is a Gauge
-      # that's only updated during LLM bake-offs (first run + re-anchor).
-      # We require recency via `changes(...) > 0` — fires only when the
-      # gauge moved within the last 10m AND the value is below threshold.
-      # That way old low-agreement values from past bake-offs don't keep
-      # the alert firing in steady state.
+      # Fresh bake-off disagreement
       - alert: BakeOffFieldDisagreement
         expr: |
           (

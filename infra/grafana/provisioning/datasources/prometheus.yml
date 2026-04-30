@@ -9,9 +9,7 @@ datasources:
     isDefault: true
     editable: false
 
-  # Postgres for direct SQL panels — entity history, change logs, run tables.
-  # Lets dashboards read the entity_changes table without going through
-  # Prometheus aggregation, which collapses high-cardinality data.
+  # Postgres for direct SQL panels
   - name: Postgres
     uid: postgres
     type: postgres

@@ -1,23 +1,3 @@
-"""Deterministic DOM extractor: applies a cached anchor recipe to HTML.
-
-The LLM produced the recipe (CSS selectors + extract methods + transforms);
-this module just applies it via BeautifulSoup. Pure Python, no network, no
-tokens, sub-second on 300KB HTML. This is what runs on every poll after
-the first.
-
-Recipe shape (from `extracto`):
-  {
-    "root_selector": "table.protocols tbody tr",
-    "expected_count": 30,
-    "fields": {
-      "name":  {"selector": "td:nth-child(2)", "extract": "text", "transform": "trim"},
-      "price": {"selector": ".price",          "extract": "text", "transform": "parseFloat"},
-      "url":   {"selector": "a",               "extract": "attr:href", "transform": null}
-    },
-    "verification": {"name": "...", "price": 123.45, "url": "..."}
-  }
-"""
-
 from __future__ import annotations
 
 import re
@@ -72,15 +52,9 @@ def apply_anchors(
     anchors: dict,
     identity_field: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Apply an anchor recipe to HTML and return entities.
-
-    Dedup: when the same identity value appears in multiple matched rows
-    (common when a page has multiple .wikitable / similar repeating regions
-    and the root_selector matches them all), we keep the FIRST occurrence in
-    DOM order. BeautifulSoup's `select` preserves source order, so the first
-    is reliably the same across re-scrapes — eliminating the flicker where
-    the SAME identity got bound to different DOM rows on different runs.
-    """
+    
+    #apply an anchor recipe to HTML and return entities.
+    
     if not anchors or not anchors.get("root_selector"):
         return []
     soup = BeautifulSoup(html, "lxml")
@@ -98,9 +72,6 @@ def apply_anchors(
             child = root.select_one(sel) if sel else root
             raw = _apply_extract(child, recipe.get("extract", "text"))
             entity[field_name] = _apply_transform(raw, recipe.get("transform"))
-
-        # First-occurrence dedup. Empty/None identities pass through (we still
-        # need them to count toward expected_count for verification).
         if identity_field:
             id_val = entity.get(identity_field)
             id_str = (str(id_val).strip() if id_val is not None else "")
@@ -113,18 +84,6 @@ def apply_anchors(
 
 
 def verify_anchors(html: str, anchors: dict, schema_fields: list[str] | None = None) -> dict[str, Any]:
-    """Apply anchors and grade them.
-
-    Returns:
-      {
-        "ok": bool,            # would we trust these for production polls?
-        "count": int,           # how many entities BS4 matched
-        "expected_count": int,  # what the LLM claimed
-        "first": {...},         # first matched entity (for inspection)
-        "verification_match": bool,   # does first match the LLM's verification sample?
-        "reasons": [...],       # why we'd reject these anchors
-      }
-    """
     reasons: list[str] = []
     entities = apply_anchors(html, anchors)
     expected = int(anchors.get("expected_count") or 0)
@@ -135,7 +94,6 @@ def verify_anchors(html: str, anchors: dict, schema_fields: list[str] | None = N
         reasons.append("root_selector matched zero elements")
 
     if expected > 0:
-        # Allow 30% slack — pages add/remove a row between snapshots.
         floor = max(1, int(expected * 0.5))
         if got < floor:
             reasons.append(f"matched {got} elements vs expected ~{expected}")
@@ -143,9 +101,6 @@ def verify_anchors(html: str, anchors: dict, schema_fields: list[str] | None = N
     verification = anchors.get("verification")
     verification_match = False
     if verification and first:
-        # Field-by-field equality on the LLM's verification probe — using the
-        # identity field (and any other listed fields) we sanity-check that
-        # what BS4 extracted matches what the LLM said the first row would be.
         keys = (schema_fields or list(verification.keys()))[:1] or list(verification.keys())[:1]
         if keys:
             k = keys[0]

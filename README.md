@@ -15,6 +15,7 @@ The Wikipedia source in this repo polls 113 entities every minute for $0. The De
 | [EVALUATION.md](./EVALUATION.md) | Real numbers from real runs: 4 cloud models compared, fast-path SLI, cost per source. |
 | [SWOT_ANALYSIS.md](./SWOT_ANALYSIS.md) | One engineer's modified SWOT for every tool the project picked. |
 | [CHANGELOG.md](./CHANGELOG.md) | What changed across 0.1, 0.2, 0.3. |
+| [AI_DISCLOSURE.md](./AI_DISCLOSURE.md) | How AI assistance was used (per syllabus citation requirement). What I designed vs. what was AI-stitched. |
 
 ## Architecture
 
