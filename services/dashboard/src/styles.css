@@ -124,6 +124,8 @@ input:focus, textarea:focus, select:focus { outline: none; border-color: var(--a
 .schema-row { gap: 6px; margin-bottom: 6px; }
 .schema-row:last-child { margin-bottom: 0; }
 .schema-row select { width: 110px; }
+.role-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.role-toggle input { accent-color: var(--warn); }
 
 /* json preview */
 .json-preview {

@@ -139,20 +139,35 @@ function fieldsToSchema(fields) {
 function SchemaBuilder({ fields, setFields }) {
   const update = (i, patch) => { const n = fields.slice(); n[i] = { ...n[i], ...patch }; setFields(n); };
   const remove = (i) => setFields(fields.filter((_, idx) => idx !== i));
-  const add = () => setFields([...fields, { name: "", type: "string" }]);
+  const add = () => setFields([...fields, { name: "", type: "string", volatile: false }]);
   return (
     <div className="schema-builder">
       <div className="muted small" style={{ marginBottom: 8 }}>
-        Schema fields — first field is the implicit identity for dedup. Add fields you want extracted.
+        Schema fields. <strong>Anchor</strong> fields locate the entity (stable identity). <strong>Volatile</strong> fields are watched for changes over time — only their drift counts as "updated."
+      </div>
+      <div className="row schema-row schema-header" style={{ fontSize: 11, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+        <span style={{ flex: 1 }}>name</span>
+        <span style={{ width: 110 }}>type</span>
+        <span style={{ width: 86 }}>role</span>
+        <span style={{ width: 28 }}></span>
       </div>
       {fields.map((f, i) => (
         <div className="row schema-row" key={i}>
           <input className="grow" placeholder={i === 0 ? "field name (e.g. title)" : "field name"} value={f.name} onChange={(e) => update(i, { name: e.target.value })} />
-          <select value={f.type} onChange={(e) => update(i, { type: e.target.value })}>
+          <select value={f.type} onChange={(e) => update(i, { type: e.target.value })} style={{ width: 110 }}>
             {FIELD_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
-          {i === 0 && <Badge kind="muted" title="implicit identity">id</Badge>}
-          <button type="button" className="ghost" onClick={() => remove(i)} disabled={fields.length === 1} title="remove field">×</button>
+          <label className="role-toggle" style={{ width: 86 }}>
+            <input
+              type="checkbox"
+              checked={!!f.volatile}
+              disabled={i === 0}
+              onChange={(e) => update(i, { volatile: e.target.checked })}
+              title={i === 0 ? "primary identity is always anchor" : "watch this field for changes"}
+            />
+            <span className="small">{f.volatile ? "volatile" : "anchor"}</span>
+          </label>
+          <button type="button" className="ghost" onClick={() => remove(i)} disabled={fields.length === 1} title="remove field" style={{ width: 28 }}>×</button>
         </div>
       ))}
       <button type="button" className="secondary" onClick={add} style={{ marginTop: 8 }}>+ field</button>
@@ -175,8 +190,10 @@ const PRESETS = {
     label: "HN front page",
     anchor: "the list of front-page submissions with their points and authors",
     fields: [
-      { name: "title", type: "string" }, { name: "points", type: "number" },
-      { name: "user", type: "string" },  { name: "comments", type: "number" },
+      { name: "title",    type: "string", volatile: false },
+      { name: "user",     type: "string", volatile: false },
+      { name: "points",   type: "number", volatile: true },
+      { name: "comments", type: "number", volatile: true },
     ],
     cron: "*/2 * * * *",
   },
@@ -185,11 +202,11 @@ const PRESETS = {
     label: "DeFi protocols",
     anchor: "the list of DeFi protocols with their TVL, price, and 24h change",
     fields: [
-      { name: "name", type: "string" },
-      { name: "token", type: "string" },
-      { name: "price_usd", type: "number" },
-      { name: "tvl_usd", type: "number" },
-      { name: "change_24h_pct", type: "number" },
+      { name: "name",            type: "string", volatile: false },
+      { name: "token",           type: "string", volatile: false },
+      { name: "price_usd",       type: "number", volatile: true },
+      { name: "tvl_usd",         type: "number", volatile: true },
+      { name: "change_24h_pct",  type: "number", volatile: true },
     ],
     cron: "*/2 * * * *",
   },
@@ -198,8 +215,10 @@ const PRESETS = {
     label: "Lobste.rs",
     anchor: "the list of recent stories with their submitter and tags",
     fields: [
-      { name: "title", type: "string" }, { name: "submitter", type: "string" },
-      { name: "tags", type: "string[]" }, { name: "comments", type: "number" },
+      { name: "title",     type: "string",    volatile: false },
+      { name: "submitter", type: "string",    volatile: false },
+      { name: "tags",      type: "string[]",  volatile: false },
+      { name: "comments",  type: "number",    volatile: true },
     ],
     cron: "*/5 * * * *",
   },
@@ -209,7 +228,7 @@ function NewSourceForm({ onCreated }) {
   const [url, setUrl] = useState("");
   const [label, setLabel] = useState("");
   const [anchor, setAnchor] = useState("");
-  const [fields, setFields] = useState([{ name: "title", type: "string" }]);
+  const [fields, setFields] = useState([{ name: "title", type: "string", volatile: false }]);
   const [primary, setPrimary] = useState(ALL_MODELS[0]);
   const [challengers, setChallengers] = useState(new Set(ALL_MODELS.slice(1)));
   const [cron, setCron] = useState("");
@@ -240,7 +259,7 @@ function NewSourceForm({ onCreated }) {
       const { id } = await createSource(payload);
       if (alsoRun) await triggerRun(id);
       setUrl(""); setLabel(""); setAnchor(""); setCron("");
-      setFields([{ name: "title", type: "string" }]);
+      setFields([{ name: "title", type: "string", volatile: false }]);
       onCreated();
     } finally { setBusy(false); }
   };

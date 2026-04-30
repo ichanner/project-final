@@ -10,25 +10,28 @@ import { client, DEFAULT_MODEL, estimateCost } from "./anthropicClient.js";
 // rows and the response would blow past max_tokens. BS4 handles bulk extract.
 const HYBRID_SYSTEM_PROMPT = `You receive raw HTML from a single web page and a description of a homogeneous collection of entities. You return a JSON object with:
 
-(1) A CSS-selector RECIPE that a downstream BeautifulSoup engine will apply to extract every entity from this page (and every future poll of the same page). When the recipe works, no future LLM calls are needed.
+(1) A CSS-selector RECIPE that a downstream BeautifulSoup engine will apply on every future poll. Subsequent polls will NOT call you — they apply this recipe deterministically. So getting it right matters.
 
-(2) The first 3 entities as a sample, used to verify the recipe and as a small fallback if BS4 can't apply it.
+(2) The first 30 entities as a sample (verification + bootstrap).
+
+Field roles (CRUCIAL — read this carefully):
+- ANCHOR fields are stable identifiers. They are how we LOCATE this entity in future scrapes and how we tell entities apart. Their selector must produce byte-stable text — prefer visible content of stable elements; avoid whitespace-noisy nodes; do NOT include footnote markers or wrapper spans that vary.
+- VOLATILE fields are the values we are watching for change over time. Their selector must target the cell that actually contains the changing value (price, score, count, status). Cells next to anchor fields in the same row are usually the right targets.
 
 Recipe rules:
-- root_selector: a CSS selector matching EVERY row in the repeating collection (one match = one entity). Test it mentally: how many rows would this match? It must equal expected_count.
-- fields: for each schema field, a sub-selector relative to root + an extract method.
-  - extract: "text", "attr:<name>" (e.g. "attr:href"), or "html".
-  - transform: "parseFloat" (numbers), "parseInt", "trim", "lower", "upper", or null.
-- IDENTITY field "{{IDENTITY_FIELD}}" must use the most stable selector available — prefer plain visible text on stable elements; avoid auto-generated IDs, hash-suffixed classes, timestamps.
-- expected_count: integer estimate of total rows root_selector matches on this page.
-- Use the schema's field names verbatim. Don't invent fields.
+- root_selector: ONE CSS selector matching EVERY row in the target collection — and ONLY that collection. If the page has multiple tables, scope it tightly (e.g. \`table#primary tbody tr\`, NOT \`table.wikitable tbody tr\`). expected_count must be an honest estimate.
+- fields: for each schema field, a sub-selector relative to root + extract + transform.
+  - extract: "text", "attr:<name>", or "html".
+  - transform: "parseFloat", "parseInt", "trim", "lower", "upper", or null.
+- IDENTITY (primary anchor) field "{{IDENTITY_FIELD}}" — selector must be byte-stable across re-fetches.
+- Use the schema's field names verbatim.
 
 Entities rules:
-- Return UP TO THE FIRST 30 entities. Stop after 30 even if more exist — BS4 will get the rest from the recipe.
-- Field types must match the schema (numbers as numbers, not strings).
-- Use null for missing fields.
+- Up to first 30 entities. Field types must match schema. Use null for missing.
 
-Reply with ONLY a JSON object. No prose, no fences. Top-level keys: root_selector, expected_count, fields, entities, confidence.`;
+Reply with ONLY a JSON object. No prose, no fences. Top-level keys: root_selector, expected_count, fields, entities, confidence.
+
+The schema you receive includes a "role" annotation per field. Honor it. Volatile-field selectors should target nodes whose textContent is JUST that value (no surrounding noise).`;
 
 const HTML_HARD_CAP = Number(process.env.EXTRACTO_HTML_CAP ?? 300_000);
 

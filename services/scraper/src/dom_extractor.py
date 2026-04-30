@@ -67,25 +67,47 @@ def _apply_transform(value: Any, transform: str | None) -> Any:
     return value
 
 
-def apply_anchors(html: str, anchors: dict) -> list[dict[str, Any]]:
-    """Apply an anchor recipe to HTML, return entities."""
+def apply_anchors(
+    html: str,
+    anchors: dict,
+    identity_field: str | None = None,
+) -> list[dict[str, Any]]:
+    """Apply an anchor recipe to HTML and return entities.
+
+    Dedup: when the same identity value appears in multiple matched rows
+    (common when a page has multiple .wikitable / similar repeating regions
+    and the root_selector matches them all), we keep the FIRST occurrence in
+    DOM order. BeautifulSoup's `select` preserves source order, so the first
+    is reliably the same across re-scrapes — eliminating the flicker where
+    the SAME identity got bound to different DOM rows on different runs.
+    """
     if not anchors or not anchors.get("root_selector"):
         return []
     soup = BeautifulSoup(html, "lxml")
     root_nodes = soup.select(anchors["root_selector"])
     fields: dict[str, dict] = anchors.get("fields") or {}
+    if identity_field is None and fields:
+        identity_field = next(iter(fields))
 
     out: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
     for root in root_nodes:
         entity: dict[str, Any] = {}
         for field_name, recipe in fields.items():
             sel = recipe.get("selector")
-            if sel:
-                child = root.select_one(sel)
-            else:
-                child = root
+            child = root.select_one(sel) if sel else root
             raw = _apply_extract(child, recipe.get("extract", "text"))
             entity[field_name] = _apply_transform(raw, recipe.get("transform"))
+
+        # First-occurrence dedup. Empty/None identities pass through (we still
+        # need them to count toward expected_count for verification).
+        if identity_field:
+            id_val = entity.get(identity_field)
+            id_str = (str(id_val).strip() if id_val is not None else "")
+            if id_str:
+                if id_str in seen_ids:
+                    continue
+                seen_ids.add(id_str)
         out.append(entity)
     return out
 
