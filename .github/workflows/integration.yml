@@ -21,6 +21,7 @@ jobs:
             up -d --build --wait
         env:
           DOCKER_BUILDKIT: 1
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 
       - name: Print service status
         run: docker compose ps
@@ -36,7 +37,6 @@ jobs:
         run: |
           echo "::group::scraper" && docker compose logs scraper && echo "::endgroup::"
           echo "::group::extracto" && docker compose logs extracto && echo "::endgroup::"
-          echo "::group::heuristic" && docker compose logs heuristic && echo "::endgroup::"
           echo "::group::postgres" && docker compose logs postgres && echo "::endgroup::"
           echo "::group::fixture" && docker compose logs fixture && echo "::endgroup::"
 

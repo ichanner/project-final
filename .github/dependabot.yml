@@ -16,11 +16,6 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-  - package-ecosystem: pip
-    directory: /services/heuristic
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
 
   # Node dependencies (npm).
   - package-ecosystem: npm
@@ -41,10 +36,6 @@ updates:
       interval: weekly
   - package-ecosystem: docker
     directory: /services/extracto
-    schedule:
-      interval: weekly
-  - package-ecosystem: docker
-    directory: /services/heuristic
     schedule:
       interval: weekly
   - package-ecosystem: docker

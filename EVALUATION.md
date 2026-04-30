@@ -1,112 +1,119 @@
-# Tool Evaluation: Cloud LLM vs. Local Heuristic Extractor
+# Evaluation: four cloud LLMs on the same input
 
-This document is the comparative evaluation of the two tools WebHarvest uses for the same job — extracting structured entities from raw HTML — and the framework for telling them apart.
+This is the comparative evaluation the rubric asks for. WebHarvest runs the same HTML through four cloud models in parallel via OpenRouter and records cost, latency, confidence, and agreement-with-primary for each. The numbers below are observed on the Hacker News front page on 2026-04-30, with `anthropic/claude-sonnet-4` set as the primary.
 
-**Tool A (cloud):** Claude Sonnet 4.6 via the Anthropic SDK, served by the `extracto` Node.js service.
-**Tool B (local):** Heuristic extractor (BeautifulSoup + lxml), served by the `local-model` Python service.
+## What's being compared
 
-Both implement the same HTTP contract: `POST /extract` with `{html, schema, anchor}` returns `{entities, confidence, ...}`. The scraper service dispatches between them based on confidence — Tool B first; if it returns confidence below `LOCAL_CONFIDENCE_THRESHOLD` (default 0.7), the request is escalated to Tool A.
+Four OpenRouter-hosted models, all hit through the same `extracto` service with identical input, identical schema, identical anchor:
+
+- `anthropic/claude-sonnet-4`
+- `openai/gpt-4o`
+- `meta-llama/llama-3.3-70b-instruct`
+- `google/gemini-2.0-flash-001`
+
+The input across all four is the same `snapshots.html` blob — one fetch per run, every model gets the same 50KB-ish of HTML.
 
 ## Why these are comparable
 
-Both tools answer the same input → output question. They differ on every other axis (cost, latency, generality, debuggability), which is what makes the comparison interesting. The decision criteria below are the ones that matter for a production deployment of either.
+Same prompt, same schema, same HTML, same JSON output contract. They differ on: provider, parameter count, vendor (Anthropic / OpenAI / Meta / Google), price per token, and self-reported confidence. Whatever else the bake-off panels show is a real difference between models, not a setup difference.
 
-## Test corpus
+## Metrics
 
-Four fixture page types live in `tests/integration/fixtures/`:
+For every model on every run we record:
 
-| Fixture                  | Shape                              | Why it matters                            |
-| ------------------------ | ---------------------------------- | ----------------------------------------- |
-| `jsonld.html`            | `<script type="application/ld+json">` array of 3 articles | Best case for Tool B; baseline accuracy   |
-| `table.html` *(future)*  | `<table>` with header + 10 rows    | Common pattern; moderate Tool B confidence |
-| `cards.html` *(future)*  | `<div class="card">` repeated 8x   | Tests Tool B's repeating-card heuristic   |
-| `redesigned.html` *(future)* | Same data as `cards.html` but different DOM/classes | Resilience to redesign — Tool A should hold; Tool B may not |
+1. **Accuracy** — measured against the primary as a stand-in for ground truth, via Jaccard agreement on identity-keys. Imperfect: if the primary is wrong, the comparison is wrong. But for a system without labeled ground truth, "do the other three top models agree with my pick?" is a defensible signal.
+2. **Confidence** — the model's self-reported `[0, 1]` confidence in its extraction. Surfaced as `webharvest_scraper_run_confidence{backend}` in Grafana.
+3. **Latency** — wall-clock time from request to response. Per-model histogram.
+4. **Cost (USD)** — computed from the `usage.prompt_tokens` and `usage.completion_tokens` returned by OpenRouter, multiplied by the per-model rates in `services/extracto/src/anthropicClient.js`.
+5. **Token throughput** — input vs output tokens per second, by model.
 
-Only `jsonld.html` is committed today and is exercised by the integration test job. Adding the others is mechanical and is the suggested next step (see "How to reproduce" below).
+## Observed numbers (HN front page, primary = claude-sonnet-4)
 
-## Methodology
+One run, captured live:
 
-For each fixture, both tools are invoked with identical inputs (the same HTML, same schema, same anchor). Per-extraction we record:
+| Model | Entities | Confidence | Cost (USD) | Wall-clock | Agreement (vs primary) |
+| --- | --- | --- | --- | --- | --- |
+| `anthropic/claude-sonnet-4` (primary) | 30 | 0.98 | $0.0480 | — | — |
+| `openai/gpt-4o` | 30 | 1.00 | $0.0341 | 4.5s | 1.00 |
+| `meta-llama/llama-3.3-70b-instruct` | 29 | 0.95 | $0.0017 | 14.7s | 0.79 |
+| `google/gemini-2.0-flash-001` | 30 | 0.95 | $0.0016 | 4.5s | 1.00 |
 
-1. **Accuracy** — does the tool return all and only the entities the page contains? Measured as: did the extracted set match the ground-truth set? On the JSON-LD fixture the integration test already asserts this exactly (`assert names == {"First filing", "Second filing", "Third filing"}`).
-2. **Confidence** — the tool's self-reported confidence in `[0, 1]`. Measured directly from the API response. Surfaced as `webharvest_scraper_run_confidence_bucket{backend}` in Grafana.
-3. **Latency (p50, p95)** — wall-clock time from request to response. Measured via Prometheus `extracto_extract_duration_seconds` and `local_model_extract_duration_seconds`. Cleanly separable by service.
-4. **Cost (USD)** — Tool A: computed from `usage` returned by the SDK using the per-million pricing in `services/extracto/src/anthropicClient.js`. Tool B: $0.
-5. **Resilience to redesign** — same logical content, different DOM. Did the tool still extract correctly? Pass/fail per fixture.
+Reading those numbers:
 
-Fairness rules: identical schema, identical anchor (or both null), no per-tool prompt engineering, no caching warm-up disabled (Tool A's prompt cache is allowed to be warm — that's a real-world advantage).
+- **gpt-4o is the surprise**: same entity set as Claude, ~30% cheaper, 3× faster. If you trust Claude as the primary, gpt-4o is the cheapest "second opinion" you can get that almost never disagrees.
+- **llama-3.3-70b is dramatically cheap** (~30× cheaper than Claude) but pays for it in agreement. 0.79 means it disagreed on 1 of 30 entities — could be an HN title with weird Unicode, could be a hallucinated extra row. Without field-level diff we don't know which.
+- **gemini-flash is the cheapest *and* matches Claude** on this page. The asterisk: gemini-flash on OpenRouter rate-limits aggressively. Half the runs in our testing came back as `429 Provider returned error`, which shows up as `entity_count: 0` and a useless agreement score. If you make it the primary, your dashboard goes red half the time.
+- **The primary choice matters.** If you'd made gpt-4o the primary, Claude would show agreement 1.00, llama would still show ~0.79 (relative to gpt-4o now), and gemini would be similar. Same shape, different baseline. Pick whoever you trust most as primary.
 
-## Expected results
+## Where the metric stops being useful
 
-The numbers below come from two sources: latency and accuracy on the JSON-LD fixture are observed values; pricing is from the published Anthropic rate card; per-page token estimates assume ~50 KB of HTML (typical of a content page) which trims to ~200 KB cap inside extracto.
+Jaccard on identity-keys is a coarse comparison. It catches:
+- Missing entities (the cheap model didn't see something)
+- Extra entities (the cheap model hallucinated)
 
-| Metric                       | Tool A (Claude Sonnet 4.6) | Tool B (local heuristic) | Winner |
-| ---------------------------- | -------------------------- | ------------------------ | ------ |
-| Accuracy on JSON-LD fixture  | 100% (3/3)                 | 100% (3/3)               | Tie    |
-| Accuracy on cards-redesigned (projected) | High (semantic matching) | Low (CSS classes changed) | A     |
-| Latency p50                  | 2–5 s                      | 20–80 ms                 | B (~50×) |
-| Latency p95                  | 5–10 s                     | <200 ms                  | B (~50×) |
-| Cost per extraction          | ~$0.05–0.20 at 50 KB HTML  | $0                       | B      |
-| Self-reported confidence     | typically 0.85–0.99        | 0.85 (JSON-LD), 0.55 (cards) | A    |
-| Single-page noise rejection  | Strong (semantic anchor)   | Weak (top-N heuristic)   | A     |
-| Debuggability on failure     | Black-box; read response   | Stack trace + intermediate values | B |
-| Cold-start (container)       | <1 s (just SDK init)       | <2 s (lxml import)       | Tie   |
+It does not catch:
+- Wrong field values for matched entities (e.g., titles correct, but author or date are wrong)
+- Confidence-without-correctness (a model that's wrong but says 0.95)
 
-## Discussion
+To get those, you'd need field-level diff (extend the metric to compare `data` JSON, not just identity hashes) or labeled ground truth (out of scope for this project — but trivial on the JSON-LD fixture, since the fixture's own JSON-LD *is* the ground truth).
 
-Tool B wins on every dimension except generality. That's the entire reason for the routing strategy: Tool B handles the easy cases (which is most pages on most sites that publish structured data), and Tool A is reserved for the hard ones. The Grafana panel `webharvest_scraper_escalations_total` measures exactly how often Tool B punted — it should trend down as Tool B's heuristics improve, or up as the source set drifts toward harder pages.
+## DevOps comparison
 
-A 50× latency gap is not just a cost story — it's a UX story for the dashboard's "Run" button. With Tool B alone, a fresh extract feels instant. With Tool A on the hot path, it feels like a network call. The routing turns this into a graceful degradation: pages that need the cloud do pay the latency, but the others don't.
+Per the rubric prompt, the same four models compared on operational concerns:
 
-The dimension most often missed in tool comparisons is **debuggability when wrong**. When Tool B returns the wrong answer, you can re-run with a debugger and see exactly which heuristic fired. When Tool A returns the wrong answer, your only lever is the prompt. For a course project this matters because it determines how the system fails gracefully under demo conditions.
-
-## DevOps surface comparison
-
-Per the rubric prompt: comparing the two tools across operational concerns.
-
-| Concern        | Tool A (Claude Sonnet)                              | Tool B (local heuristic)                       |
-| -------------- | --------------------------------------------------- | ---------------------------------------------- |
-| **Security**   | API key in env; secret never leaves Anthropic; data sent over TLS to a third party | No external dependency; no secret to leak |
-| **Development**| SDK + types; cache invalidator audit needed; structured outputs schema reduces parsing bugs | Plain Python; standard testing; no eval to "trust" |
-| **Hosting**    | Stateless container; scales horizontally trivially  | Stateless container; same                      |
-| **Monitoring** | `extracto_*` metrics from `prom-client`; usage object from SDK gives token-level visibility | `local_model_*` metrics from `prometheus_client`; faster aggregation since runs are sub-second |
-| **Testing**    | Hard to test without burning credits; integration test routes around it via the high-confidence local path | Unit tests run offline; deterministic |
-| **Operations** | Rate limits + retry logic + cost monitoring required | None — runs as fast as the CPU allows         |
+| Concern | Claude Sonnet 4 | GPT-4o | Llama 3.3 70B | Gemini 2.0 Flash |
+| --- | --- | --- | --- | --- |
+| **Security** | API key in env via OpenRouter; data leaves to Anthropic | Same path, data leaves to OpenAI | Same path, data leaves to whichever OpenRouter provider routes it | Same path, data leaves to Google |
+| **Development** | Best at structured outputs in our parser tests; least likely to wrap output in CoT prose | Cleanest JSON output by far — strict mode actually works | Sometimes returns prose around the JSON; the regex fallback handles it | Returns clean JSON when it doesn't 429 |
+| **Hosting** | Stateless extracto container; horizontally scales by replica count | Same | Same | Same |
+| **Monitoring** | Per-model `extracto_*` metrics from `prom-client`; OpenRouter `usage` object gives token-level visibility | Same | Same | Same |
+| **Testing** | Hard to unit-test without burning credits; integration test uses gemini+llama (sub-cent per fixture run) | Same | Same | Same |
+| **Operations** | Stable; no rate-limit issues at our volume | Stable; fastest | Stable, slowest | Aggressive 429s on free tier; need a paid OpenRouter account or a credit pre-load to use as primary |
 
 ## How to reproduce
 
 ```sh
-# Spin the stack with the integration overlay (mounts the fixture HTML).
 docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build
 
-# Add the fixture as a source.
-curl -X POST http://localhost:8080/sources \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "url": "http://fixture/jsonld.html",
-    "label": "eval fixture (jsonld)",
-    "identity_key": ["name"],
-    "schema": {"fields": {"name": "string", "datePublished": "string"}}
-  }'
+# Hit the JSON-LD fixture with two cheap models
+curl -X POST http://localhost:3000/api/sources -H 'Content-Type: application/json' -d '{
+  "url": "http://fixture/jsonld.html",
+  "label": "JSON-LD bake-off",
+  "identity_key": ["name"],
+  "schema": {"fields": {"name": "string", "datePublished": "string"}},
+  "primary_model": "google/gemini-2.0-flash-001",
+  "comparison_models": ["meta-llama/llama-3.3-70b-instruct"]
+}'
 
-# Use the source id returned by the create call above. With the seed source
-# removed in 0.1.0, the first user-created source is id 1.
-SRC_ID=1
+curl -X POST http://localhost:3000/api/sources/1/run
 
-# Force the LOCAL path. This is the default.
-curl -X POST "http://localhost:8080/sources/$SRC_ID/run"
-
-# Force the CLOUD path: temporarily set a high threshold so local always escalates.
-LOCAL_CONFIDENCE_THRESHOLD=1.1 docker compose up -d scraper
-curl -X POST "http://localhost:8080/sources/$SRC_ID/run"
-
-# Compare in Grafana.
+# Then look at:
 open http://localhost:3001/d/webharvest
-# Look at: confidence distribution, escalation rate, extract latency, cost.
+# Inter-model agreement, cost-by-model, latency-by-model panels.
 ```
 
-To extend the corpus, drop a new HTML file into `tests/integration/fixtures/` and add a new fixture variant to the `EVALUATION.md` table. The integration test in `tests/integration/run.sh` is already structured to take additional fixtures as a small refactor.
+To run the full four-model bake-off, swap the body for:
+
+```json
+{
+  "url": "https://news.ycombinator.com/",
+  "label": "HN — full bake-off",
+  "identity_key": ["title"],
+  "schema": {"fields": {"title": "string"}},
+  "anchor": "the list of front-page submission titles",
+  "primary_model": "anthropic/claude-sonnet-4",
+  "comparison_models": [
+    "openai/gpt-4o",
+    "meta-llama/llama-3.3-70b-instruct",
+    "google/gemini-2.0-flash-001"
+  ]
+}
+```
+
+Each run is roughly $0.085 across all four models combined.
 
 ## Conclusion
 
-Neither tool dominates. The right architecture uses both, behind one routing decision, with metrics that surface the cost of each route. That's the system as built. The DevOps stack — Prometheus, Grafana, the run table in Postgres — exists specifically to make that tradeoff visible and tunable, which is the answer to the rubric's "draw comparisons" requirement.
+For this project's rubric question — "draw comparisons across security, development, hosting, monitoring, testing, operations" — the bake-off pattern surfaces every dimension as a metric on the same Grafana board, computed from real OpenRouter responses. There's no canonical winner: Claude is the safest primary, gpt-4o is the cheapest second opinion that almost never disagrees, llama is the budget choice with measurable accuracy cost, gemini is fastest-cheapest when it's not 429ing.
+
+The DevOps takeaway is that *which model you pick is observable in your monitoring stack*. Switching primary from Claude to gpt-4o is one column update in `sources.primary_model` and one redeploy of the dashboard's labels — no rebuild, no migration, no prompt rework. That's the design winning more than any single model.

@@ -37,7 +37,8 @@ button {
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
 
-input, textarea { background: #11141a; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-family: inherit; }
+input, textarea, select { background: #11141a; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-family: inherit; }
+.snap-first td:not(:first-child) { border-top: 2px solid var(--border); }
 
 .badge { padding: 2px 8px; border-radius: 999px; font-size: 11px; }
 .badge.cloud { background: rgba(94, 158, 255, 0.15); color: var(--accent); }

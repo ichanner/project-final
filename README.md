@@ -1,51 +1,53 @@
 # WebHarvest
 
-A small system that watches structured data on the web — listings, tables, repeating cards — and tells you when it changes. Built as a course project for DevOps Principles and Practices, so the focus is the operational surface (containers, CI, security scanning, metrics) rather than research-grade extraction.
+A small system that watches structured data on the web — listings, tables, repeating cards — and tells you when it changes. Built as a course project for DevOps Principles and Practices, so the focus is the operational surface (containers, CI, security scanning, metrics) and not so much research-grade extraction.
 
-The interesting bit is the routing layer. A scrape goes through a heuristic extractor first (BeautifulSoup, JSON-LD parser, table detector). If that misses, the same HTML gets handed to one of four cloud LLMs through OpenRouter. Every call is timed, priced, and labeled by model, so the Grafana dashboard ends up being a real-world cost/latency/accuracy comparison across models on the same input.
+The interesting bit: every scrape runs through a **multi-model bake-off**. The same HTML gets handed to up to four cloud LLMs in parallel via OpenRouter — Claude Sonnet 4, GPT-4o, Llama 3.3 70B, Gemini 2.0 Flash. One of them is the "primary" (its entities are what gets persisted); the others are challengers, run on the same snapshot to measure cost, latency, and agreement against the primary. Grafana ends up being a real-world side-by-side comparison.
 
 ## Reading order
 
 | Document | What's in it |
 | --- | --- |
-| [README.md](./README.md) | This file. Setup, the four-model routing, DevOps stack. |
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | Service graph, the request flow, what each metric is for. |
-| [EVALUATION.md](./EVALUATION.md) | Side-by-side: claude-sonnet-4, gpt-4o, llama-3.3-70b, gemini-2.0-flash, plus the heuristic. Real numbers from real runs. |
-| [SWOT_ANALYSIS.md](./SWOT_ANALYSIS.md) | SWOT for each of the four models and each piece of the stack. |
+| [README.md](./README.md) | This. Setup, the bake-off pattern, DevOps stack. |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | Service graph, request flow, what each metric is for. |
+| [EVALUATION.md](./EVALUATION.md) | Side-by-side: real numbers from real runs across the four models. |
+| [SWOT_ANALYSIS.md](./SWOT_ANALYSIS.md) | SWOT for each model and each piece of the stack. |
+| [CHANGELOG.md](./CHANGELOG.md) | Why the design changed in 0.2.0. |
 
 ## Architecture
 
 ```
-       +-----------+      +-----------+      +-------------+
-       | Dashboard | ---> |  Scraper  | -->  |  Heuristic  |  free, ~50ms
-       | (React)   |      | (FastAPI) |      | (BS4 + lxml)|
-       +-----------+      +-----+-----+      +------+------+
-              |                 |                   |
-              v                 |        confidence < 0.7
-       +------+-------+         v                   |
-       |   Grafana    |   +-----+-------+   +-------v---------+
-       |  Prometheus  |   |   Postgres  |   |    Extracto     |
-       +--------------+   +-------------+   |  (Node, OpenAI  |
-                                            |  SDK -> OpenRtr)|
-                                            +--------+--------+
-                                                     |
-                            +------------------------+------------------------+
-                            |               |               |                |
-                            v               v               v                v
-                       claude-sonnet-4   gpt-4o    llama-3.3-70b    gemini-2.0-flash
+       +-----------+      +-----------+
+       | Dashboard | ---> |  Scraper  | -- fetch + snapshot --> page HTML
+       | (React)   |      | (FastAPI) |
+       +-----------+      +-----+-----+
+              |                 | one snapshot, fan-out:
+              v                 v
+       +------+------+   +------+--------------------+
+       |   Grafana   |   |        Extracto           |
+       | Prometheus  |   |  Node + OpenAI SDK ->     |
+       +-------------+   |  OpenRouter (per model)   |
+                         +------+--------+--------+--+
+                                |        |        |
+                       +--------v--+ +---v---+ +--v--------+ ...
+                       | claude-4  | |gpt-4o | |llama-3.3  |
+                       |  sonnet   | |       | |  70b      |
+                       +-----+-----+ +---+---+ +---+-------+
+                             \________|________/
+                                      |
+                              all results -> runs table
+                              primary's entities -> entities table
+                              challenger ⊆ ∩ primary -> agreement metric
 ```
 
 | Service | Port (host) | Role |
 | --- | --- | --- |
-| `scraper` | — | Fetch, snapshot, orchestrate routing, diff, persist |
-| `heuristic` | — | Fast/free extractor for pages with structured data |
-| `extracto` | — | Cloud router. Talks OpenRouter; per-request model selection |
+| `scraper` | — | Fetch, snapshot, fan out to models, diff primary, persist |
+| `extracto` | — | Cloud router. One container, every OpenRouter model on demand. |
 | `dashboard` | 3000 | React UI |
 | `prometheus` | 9090 | Metrics |
 | `grafana` | 3001 | The operational dashboard |
-| `postgres` | — | Sources, runs, snapshots, entities |
-
-The scraper runs the heuristic first because it's free and 50× faster than any LLM. The two cases where it fails are pages without structured data (HN, most news sites) and pages where the structure is custom enough that a generic heuristic can't anchor on it. Both fall through to the cloud, and the dashboard shows how often that happens.
+| `postgres` | — | Sources, runs (one row per model per snapshot), snapshots, entities |
 
 ## Quick start
 
@@ -55,7 +57,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-To use the JSON-LD / HTML table fixtures (handy for demoing the heuristic path without paying for cloud calls):
+For the JSON-LD / HTML table fixtures (no real network needed):
 
 ```sh
 docker compose -f docker-compose.yml -f docker-compose.test.yml up --build
@@ -68,40 +70,60 @@ Then:
 
 ## Adding a source
 
-Each source picks one cloud model. The heuristic always runs first regardless. If you don't supply `model`, it falls back to `EXTRACTO_DEFAULT_MODEL`.
+A source is a URL plus a primary model and a list of challengers. The primary's output is what your downstream pipeline gets; the challengers exist to keep the primary honest.
 
 ```sh
 curl -X POST http://localhost:3000/api/sources -H 'Content-Type: application/json' -d '{
   "url": "https://news.ycombinator.com/",
-  "label": "HN — claude-sonnet-4",
+  "label": "HN — bake-off",
   "identity_key": ["title"],
   "schema": {"fields": {"title": "string"}},
   "anchor": "the list of front-page submission titles",
-  "model": "anthropic/claude-sonnet-4"
+  "primary_model": "anthropic/claude-sonnet-4",
+  "comparison_models": [
+    "openai/gpt-4o",
+    "meta-llama/llama-3.3-70b-instruct",
+    "google/gemini-2.0-flash-001"
+  ]
 }'
 
 curl -X POST http://localhost:3000/api/sources/1/run
 ```
 
-Models that have been wired up (others may work, but cost is only computed for these):
+You'll get back something like:
 
-| Slug | Input $/1M | Output $/1M |
-| --- | --- | --- |
-| `anthropic/claude-sonnet-4` | 3.00 | 15.00 |
-| `openai/gpt-4o` | 2.50 | 10.00 |
-| `meta-llama/llama-3.3-70b-instruct` | 0.13 | 0.40 |
-| `google/gemini-2.0-flash-001` | 0.10 | 0.40 |
+```json
+{
+  "snapshot_id": 1,
+  "primary_model": "anthropic/claude-sonnet-4",
+  "primary": { "entity_count": 30, "new": 30, "cost_usd": 0.048, "confidence": 0.98 },
+  "challengers": [
+    { "model": "openai/gpt-4o",                     "entity_count": 30, "cost_usd": 0.034, "agreement": 1.00, "duration_s": 4.5 },
+    { "model": "meta-llama/llama-3.3-70b-instruct", "entity_count": 29, "cost_usd": 0.002, "agreement": 0.79, "duration_s": 15.0 },
+    { "model": "google/gemini-2.0-flash-001",       "entity_count": 30, "cost_usd": 0.002, "agreement": 1.00, "duration_s": 4.5 }
+  ]
+}
+```
 
-(Pricing snapshot from OpenRouter, April 2026. Edit `services/extracto/src/anthropicClient.js` to update.)
+That object is the comparison.
 
-## Scope cuts (vs. the original spec)
+## Models
 
-These were called out up front so the project would actually ship.
+Per-1M-token pricing (USD), used for cost computation in metrics. Snapshot from OpenRouter, April 2026 — edit `services/extracto/src/anthropicClient.js` to update.
 
-- **Distilled local model** dropped. The "local" service is a heuristic (JSON-LD, microdata, tables, repeating cards). The escalation path, the confidence threshold, and the dashboard panels still work — they just compare the heuristic to the cloud models instead of comparing one cloud model to a smaller one.
-- **Wayback training pipeline** out of scope (the distilled model was its consumer).
-- **Web search source discovery** out of scope. Sources are added by URL.
-- **Pagination auto-detection** not implemented; pagination is recorded per source if you set it.
+| Slug | Input | Output | Notes |
+| --- | --- | --- | --- |
+| `anthropic/claude-sonnet-4` | 3.00 | 15.00 | Workhorse. Most reliable structured output. |
+| `openai/gpt-4o` | 2.50 | 10.00 | Fastest in our tests; usually agrees with Claude. |
+| `meta-llama/llama-3.3-70b-instruct` | 0.13 | 0.40 | 25× cheaper, 80% agreement. Good for cost-sensitive sources. |
+| `google/gemini-2.0-flash-001` | 0.10 | 0.40 | Fast and cheap, but rate-limited aggressively on free tier (429s common). |
+
+## Scope cuts vs. the original spec
+
+- **Heuristic / distilled local model** — dropped entirely in 0.2.0. The original proposal had a llama.cpp-based distilled model trained on Wayback snapshots; it was scoped down to a Python heuristic in 0.1.0, and then dropped entirely once we moved to a cloud-vs-cloud comparison. The proposal's "GPT-4o vs Claude" comparison is now the headline.
+- **Web search source discovery** — out of scope. Sources are added by URL.
+- **Wayback Machine training pipeline** — out of scope (its consumer was the distilled model).
+- **Pagination auto-detection** — not implemented; recorded per-source if you set it.
 
 ## DevOps surface
 
@@ -109,39 +131,39 @@ These were called out up front so the project would actually ship.
 | --- | --- |
 | Containers | One Dockerfile per service, multi-stage where it matters, non-root users, healthchecks |
 | Orchestration | `docker-compose.yml` with healthcheck-gated dependencies |
-| CI | `.github/workflows/ci.yml` — ruff + eslint + pytest + node:test, then `docker compose build` as a smoke gate |
-| Image vulnerability scanning | `aquasecurity/trivy-action` against each built image and the repo filesystem; SARIF uploaded to GitHub code scanning |
-| Dependency audit | `pip-audit` for the Python services, `npm audit --audit-level=high` for the Node services |
+| CI | `.github/workflows/ci.yml` — ruff + eslint + pytest + node:test, then `docker compose build` smoke gate |
+| Image vulnerability scan | `aquasecurity/trivy-action` against each built image and the repo filesystem; SARIF uploaded to GitHub code scanning |
+| Dependency audit | `pip-audit` (Python), `npm audit --audit-level=high` (Node) |
 | Secret scan | `gitleaks-action` on every PR and push |
-| Metrics | `prometheus_client` (Python) and `prom-client` (Node) on `/metrics` for every service |
-| Visualization | Grafana auto-provisioned with the WebHarvest dashboard JSON |
-| Integration test | `integration.yml` — full stack-up against fixture nginx, end-to-end create/run/re-run cycle on JSON-LD and HTML-table fixtures |
-| Image publishing | `deploy.yml` — on `v*` tags, builds and pushes all four images to GHCR with SLSA provenance + SBOM |
+| Metrics | `prometheus_client` (Python) and `prom-client` (Node) on `/metrics` |
+| Visualization | Grafana auto-provisioned with the WebHarvest dashboard |
+| Integration test | `integration.yml` — full stack-up, end-to-end create/run/re-run on JSON-LD and HTML-table fixtures with a 2-model bake-off |
+| Image publishing | `deploy.yml` — on `v*` tags, builds and pushes all three images to GHCR with SLSA provenance + SBOM |
 | Dependency updates | Dependabot for actions, pip, npm, Docker base images (weekly) |
 
 ## What the dashboard surfaces
 
-The Grafana dashboard at `:3001` is built around the multi-model comparison. The panels worth pointing at:
+The Grafana board at `:3001` is the comparison panel. Worth pointing at:
 
-- **Cost by model (USD/hr)** — what each model is actually costing per source per hour
-- **Confidence by backend** — heuristic, sonnet, gpt-4o, llama, gemini all overlaid
-- **Escalation rate per model** — how often each source escalates, broken out by which model handled it
-- **Tokens/sec by model** — input vs output token throughput
-- **Extraction latency p95** — heuristic vs each cloud model, on identical inputs
-- **Spend by model** — running total in USD, useful for a demo
-
-This is the comparison the rubric calls for: same input, four cloud models plus a free fallback, every operational axis exposed as a metric.
+- **Cost by model (USD/hr)** — what each model is costing you per hour
+- **Spend by model** — running totals; the demo's headline number
+- **Inter-model agreement (Jaccard, vs primary)** — does each challenger agree with the primary's identity-key set? 1.0 = perfect; values around 0.7 mean a model is missing or hallucinating ~30% of entities
+- **Confidence by backend (p50/p95)** — model-reported confidence, distinct per model
+- **Extraction latency p95 by model** — speed comparison under identical input
+- **Tokens/sec by model** — throughput, decomposed into input vs output
+- **Escalation rate (by model)** — challenger call counts; in bake-off mode every challenger is "escalation" by definition
+- **Entities by change type** — new/updated/stale rates from the primary's diffs
+- **Fetches/min by outcome** — fetch-side success rate per source
 
 ## Local dev (without Docker)
 
 ```sh
 (cd services/scraper && pip install -r requirements-dev.txt && uvicorn src.main:app --port 8080)
 (cd services/extracto && npm install && npm start)
-(cd services/heuristic && pip install -r requirements-dev.txt && uvicorn src.main:app --port 8082)
 (cd services/dashboard && npm install && npm run dev)
 ```
 
-You'll need a Postgres on `DATABASE_URL` and `OPENROUTER_API_KEY` in your environment.
+You'll need a Postgres reachable on `DATABASE_URL` and `OPENROUTER_API_KEY` in your environment.
 
 ## License
 
