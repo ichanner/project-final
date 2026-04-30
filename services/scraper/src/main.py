@@ -29,10 +29,10 @@ class SourceIn(BaseModel):
     anchor: str | None = None
     identity_key: list[str] = Field(default_factory=list)
     refresh_cron: str | None = None
-    # Optional: which OpenRouter model to escalate to. If omitted, the source
-    # uses the extracto service's default. We pass the slug straight through
-    # (e.g. "anthropic/claude-sonnet-4", "openai/gpt-4o").
-    model: str | None = None
+    # Bake-off config. The primary model's entities are persisted; the
+    # challenger models run on the same snapshot for measurement only.
+    primary_model: str | None = None
+    comparison_models: list[str] = Field(default_factory=list)
 
     model_config = {"populate_by_name": True, "protected_namespaces": ()}
 
@@ -84,8 +84,8 @@ def metrics() -> Response:
 def list_sources() -> list[dict[str, Any]]:
     with conn() as c, c.cursor() as cur:
         cur.execute(
-            "SELECT id, url, label, identity_key, refresh_cron, model, created_at "
-            "FROM sources ORDER BY id"
+            "SELECT id, url, label, identity_key, refresh_cron, primary_model, "
+            "comparison_models, created_at FROM sources ORDER BY id"
         )
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row, strict=False)) for row in cur.fetchall()]
@@ -95,12 +95,16 @@ def list_sources() -> list[dict[str, Any]]:
 def create_source(src: SourceIn) -> dict[str, Any]:
     with conn() as c, c.cursor() as cur:
         cur.execute(
-            "INSERT INTO sources (url, label, schema, anchor, identity_key, refresh_cron, model) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "INSERT INTO sources "
+            "(url, label, schema, anchor, identity_key, refresh_cron, "
+            " primary_model, comparison_models) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (url) DO UPDATE SET label = EXCLUDED.label, "
             "schema = EXCLUDED.schema, anchor = EXCLUDED.anchor, "
             "identity_key = EXCLUDED.identity_key, refresh_cron = EXCLUDED.refresh_cron, "
-            "model = EXCLUDED.model, updated_at = now() RETURNING id",
+            "primary_model = EXCLUDED.primary_model, "
+            "comparison_models = EXCLUDED.comparison_models, "
+            "updated_at = now() RETURNING id",
             (
                 src.url,
                 src.label,
@@ -108,7 +112,8 @@ def create_source(src: SourceIn) -> dict[str, Any]:
                 src.anchor,
                 src.identity_key,
                 src.refresh_cron,
-                src.model,
+                src.primary_model,
+                src.comparison_models,
             ),
         )
         sid = cur.fetchone()[0]
@@ -139,8 +144,9 @@ def get_entities(source_id: int, limit: int = 100) -> list[dict[str, Any]]:
 def list_runs(limit: int = 50) -> list[dict[str, Any]]:
     with conn() as c, c.cursor() as cur:
         cur.execute(
-            "SELECT id, source_id, started_at, finished_at, backend, confidence, "
-            "entity_count, new_count, updated_count, stale_count, cost_usd, error "
+            "SELECT id, source_id, snapshot_id, started_at, finished_at, backend, "
+            "is_primary, confidence, entity_count, new_count, updated_count, "
+            "stale_count, cost_usd, agreement, error "
             "FROM runs ORDER BY started_at DESC LIMIT %s",
             (limit,),
         )

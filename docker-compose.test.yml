@@ -24,5 +24,4 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       extracto: { condition: service_started }
-      heuristic: { condition: service_started }
       fixture: { condition: service_healthy }

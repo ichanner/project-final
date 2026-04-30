@@ -15,11 +15,6 @@ services:
       timeout: 5s
       retries: 10
 
-  heuristic:
-    build: ./services/heuristic
-    restart: unless-stopped
-    expose: ["8082"]
-
   extracto:
     build: ./services/extracto
     restart: unless-stopped
@@ -34,12 +29,9 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       extracto: { condition: service_started }
-      heuristic: { condition: service_started }
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-webharvest}:${POSTGRES_PASSWORD:-webharvest}@postgres:5432/${POSTGRES_DB:-webharvest}
       EXTRACTO_URL: http://extracto:8081
-      HEURISTIC_URL: http://heuristic:8082
-      HEURISTIC_CONFIDENCE_THRESHOLD: ${HEURISTIC_CONFIDENCE_THRESHOLD:-0.7}
       SCRAPER_REFRESH_CRON: ${SCRAPER_REFRESH_CRON:-0 */6 * * *}
     expose: ["8080"]
 

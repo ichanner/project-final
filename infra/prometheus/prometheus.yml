@@ -11,10 +11,6 @@ scrape_configs:
     static_configs:
       - targets: ["extracto:8081"]
 
-  - job_name: heuristic
-    static_configs:
-      - targets: ["heuristic:8082"]
-
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
