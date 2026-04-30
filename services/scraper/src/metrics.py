@@ -76,3 +76,12 @@ fast_path_duration = Histogram(
     ["source_id"],
     buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0),
 )
+
+# Per-entity policy alerts (Option A — policy-as-code). Fires when a
+# user-defined rule on a specific (source, entity, field) evaluates to true
+# during a fast-path or LLM run. Cardinality bounded by rule count.
+entity_alerts_fired_total = Counter(
+    "webharvest_entity_alerts_fired_total",
+    "Per-entity policy rule evaluations that fired",
+    ["source_id", "rule_id", "field"],
+)

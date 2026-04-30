@@ -1,7 +1,8 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
-  createSource, deleteSource, entityHistory, getAnchors, getSnapshot,
-  listEntities, listRuns, listSources, patchSource, reAnchor, triggerRun,
+  createAlertRule, createSource, deleteAlertRule, deleteSource, entityHistory,
+  getAnchors, getSnapshot, listAlertRules, listAlerts, listEntities, listRuns,
+  listSources, patchAlertRule, patchSource, reAnchor, triggerRun,
 } from "./api";
 
 // -------------------- helpers --------------------
@@ -520,6 +521,138 @@ function ExpandedEntity({ sourceId, entityId, currentData, onClose }) {
 
 // -------------------- entities table --------------------
 
+// -------------------- policy alerts (Option A) --------------------
+
+const OPERATORS = ["<", ">", "<=", ">=", "==", "!=", "contains", "!contains"];
+
+function PolicyPanel({ sourceId, schemaFieldNames }) {
+  const [rules, setRules] = useState([]);
+  const [alerts, setAlerts] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [draft, setDraft] = useState({
+    name: "", entity_match: "*", field: schemaFieldNames[0] || "",
+    operator: "<", threshold: ""
+  });
+  useTick(5000);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [r, a] = await Promise.all([listAlertRules(sourceId), listAlerts(sourceId)]);
+      setRules(r); setAlerts(a);
+    } catch (e) { /* ignore */ }
+  }, [sourceId]);
+
+  useEffect(() => {
+    refresh();
+    const t = setInterval(refresh, 5000);
+    return () => clearInterval(t);
+  }, [refresh]);
+
+  useEffect(() => {
+    setDraft((d) => ({ ...d, field: schemaFieldNames[0] || d.field }));
+  }, [schemaFieldNames]);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!draft.name || !draft.field || draft.threshold === "") return;
+    setBusy(true);
+    try {
+      await createAlertRule(sourceId, {
+        ...draft,
+        entity_match: draft.entity_match === "*" ? null : draft.entity_match,
+        enabled: true,
+      });
+      setDraft({ name: "", entity_match: "*", field: schemaFieldNames[0] || "", operator: "<", threshold: "" });
+      refresh();
+    } finally { setBusy(false); }
+  };
+
+  const toggle = async (rule) => {
+    await patchAlertRule(rule.id, { enabled: !rule.enabled });
+    refresh();
+  };
+
+  const remove = async (rule) => {
+    if (!confirm(`Delete rule "${rule.name}"?`)) return;
+    await deleteAlertRule(rule.id);
+    refresh();
+  };
+
+  return (
+    <div className="panel">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h2 style={{ margin: 0 }}>Policy alerts — source {sourceId}</h2>
+        <span className="muted small">declare a rule, system fires it on every poll for free</span>
+      </div>
+
+      <form className="policy-form" onSubmit={submit} style={{ marginTop: 12 }}>
+        <input placeholder='rule name (e.g. "HYPE under $30")' value={draft.name}
+          onChange={(e) => setDraft({ ...draft, name: e.target.value })} className="grow" />
+        <input placeholder="entity (or * for all)" value={draft.entity_match}
+          onChange={(e) => setDraft({ ...draft, entity_match: e.target.value })} style={{ width: 180 }} />
+        <select value={draft.field} onChange={(e) => setDraft({ ...draft, field: e.target.value })}>
+          {schemaFieldNames.map((f) => <option key={f} value={f}>{f}</option>)}
+        </select>
+        <select value={draft.operator} onChange={(e) => setDraft({ ...draft, operator: e.target.value })}>
+          {OPERATORS.map((op) => <option key={op} value={op}>{op}</option>)}
+        </select>
+        <input placeholder="threshold" value={draft.threshold}
+          onChange={(e) => setDraft({ ...draft, threshold: e.target.value })} style={{ width: 140 }} />
+        <button disabled={busy || !draft.name || draft.threshold === ""}>add rule</button>
+      </form>
+
+      {rules.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div className="muted small" style={{ marginBottom: 6 }}>{rules.filter(r => r.enabled).length} active / {rules.length} total</div>
+          <table className="rules-table">
+            <thead><tr>
+              <th>name</th><th>entity</th><th>field</th><th>op</th><th>threshold</th><th>state</th><th></th>
+            </tr></thead>
+            <tbody>
+              {rules.map((r) => (
+                <tr key={r.id} className={r.enabled ? "" : "disabled"}>
+                  <td><strong>{r.name}</strong></td>
+                  <td className="muted">{r.entity_match || <span style={{opacity: 0.5}}>* (all)</span>}</td>
+                  <td className="mono small">{r.field}</td>
+                  <td className="mono small">{r.operator}</td>
+                  <td className="mono small">{r.threshold}</td>
+                  <td>
+                    <button type="button" className="ghost small-btn" onClick={() => toggle(r)}>
+                      {r.enabled ? "● on" : "○ off"}
+                    </button>
+                  </td>
+                  <td><button type="button" className="ghost danger" onClick={() => remove(r)}>×</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div style={{ marginTop: 16 }}>
+        <div className="muted small" style={{ marginBottom: 6 }}>recent fires ({alerts.length})</div>
+        {alerts.length === 0 ? (
+          <p className="muted small" style={{ margin: 0 }}>no fires yet — rules evaluate on every poll, fires show up here in real time.</p>
+        ) : (
+          <div className="alert-feed">
+            {alerts.slice(0, 10).map((a) => (
+              <div key={a.id} className="alert-line">
+                <span className="muted small">{relTime(a.fired_at)}</span>
+                <Badge kind="primary">{a.rule_name}</Badge>
+                <span className="mono small">{a.entity_identity}</span>
+                <span className="muted">·</span>
+                <span className="mono small">{a.field}={JSON.stringify(a.field_value)}</span>
+                <span className="muted">{a.operator}</span>
+                <span className="mono small">{a.threshold}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Entities({ sourceId, entities, onRefresh }) {
   const [openId, setOpenId] = useState(null);
   if (!sourceId) return null;
@@ -720,6 +853,12 @@ export default function App() {
         onReAnchor={handleReAnchor} onInspectSnapshot={handleInspectSnapshot}
       />
       <SnapshotModal snapshot={snapshot} onClose={() => setSnapshot(null)} />
+      {selected && (
+        <PolicyPanel
+          sourceId={selected}
+          schemaFieldNames={(sources.find((s) => s.id === selected)?.schema_field_names) || []}
+        />
+      )}
       {selected && <Entities sourceId={selected} entities={entities} />}
       <Runs runs={runs} />
     </div>

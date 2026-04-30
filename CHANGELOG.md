@@ -1,64 +1,76 @@
 # Changelog
 
-All notable changes to WebHarvest are recorded here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0] — anchored fast-path + field roles
 
-## [0.2.0] — multi-model bake-off
+The release where the system became actually usable. Two big architectural ideas landed: LLM-bootstrapped DOM anchoring (LLM runs once per source, BeautifulSoup forever after) and the volatile/anchor field role split (drift only counts on fields you mark as worth watching).
 
-This release replaces the heuristic-vs-cloud routing with a multi-model bake-off across four cloud LLMs. Every run picks one model as the *primary* (its entities are what get persisted) and a list of *challengers* (run on the same snapshot for measurement). Grafana now shows real cost / latency / agreement comparisons across models on identical inputs.
+### Why these changes
 
-### Why
+The previous release ran the LLM on every poll and counted every micro-extraction-difference as a "drift event." Two consequences fell out:
 
-The original "local heuristic vs cloud LLM" framing wasn't really a comparison — a Python parser and an LLM aren't comparable tools. The proposal originally called for "GPT-4o vs Claude" as the headline comparison; this release makes that the actual design.
+- I drained $14 of OpenRouter credits twice in one afternoon by leaving an every-minute cron firing on Claude.
+- The Grafana drift panels showed 18-20 "updated" entities per Wikipedia poll — every poll, indefinitely. Phantom drift from whitespace and footnote-marker noise on fields that hadn't actually changed.
+
+Both were architectural problems, not configuration ones. This release fixes both architecturally.
 
 ### Added
 
-- **Bake-off runner**: `run_source()` fans out a single snapshot to every configured model in parallel (`asyncio.gather`). Each model's call becomes its own row in the `runs` table.
-- `sources.primary_model` and `sources.comparison_models[]` columns. Old `sources.model` removed.
-- `runs.is_primary` (BOOL) and `runs.agreement` (Jaccard with primary) columns.
-- `webharvest_agreement_jaccard{source_id, primary, challenger}` Prometheus gauge.
-- `webharvest_field_agreement{source_id, primary, challenger, field}` Prometheus gauge — per-field comparison on entities both models extracted.
-- New Grafana panels: cost-by-model, escalation-rate-by-model, tokens-by-model, latency-by-model, set-level agreement, per-field agreement timeseries, **field agreement matrix** (table panel with colored cells, headline visualization).
-- Dashboard React UI: full schema builder (add/edit/remove fields with type dropdown), preset buttons (HN, S&P 500, Lobste.rs), JSON preview, model dropdown + challenger checkboxes, "Add and run" one-shot button, snapshot-grouped runs table.
-- `identity_key` is now optional in the API; the implicit identity for an entity is the value of the first declared schema field.
-- Tolerant JSON parser in extracto: accepts `entities`, `data`, `items`, `results`, or `rows` as the array key — Bedrock-served Claude often emits `data` instead of `entities` regardless of the strict schema directive.
-- Four supported model slugs with per-model pricing in `extracto/src/anthropicClient.js`: `anthropic/claude-sonnet-4`, `openai/gpt-4o`, `meta-llama/llama-3.3-70b-instruct`, `google/gemini-2.0-flash-001`.
+- **`sources.anchors` JSONB column** + `last_anchored_at`. Caches the LLM's CSS-selector recipe so subsequent polls are deterministic BeautifulSoup, no LLM call.
+- **`services/scraper/src/dom_extractor.py`**. Applies cached anchors via BS4 with first-occurrence dedup — when the root selector matches the same identity in multiple page regions, only the first DOM occurrence wins. Stable across re-scrapes.
+- **Field roles**: every schema field is `anchor` (default) or `volatile`. Drift only counts on volatile fields. Anchor flicker is silent.
+- **Anchor cross-check** in `_diff_and_persist`. Reject row updates whose anchor field values disagree with the stored entity's anchors. Catches the wrong-row binding bug.
+- **`POST /sources/{id}/re-anchor`** endpoint + React button to invalidate cached anchors.
+- **`GET /sources/{id}/snapshot`** to inspect the most recent fetched HTML — verify what the LLM/BS4 actually saw.
+- **`webharvest_fast_path_total{source_id, outcome}`** + duration histogram. Per-source SLI: healthy = 95%+ hits.
+- **Field-level agreement metric** (`webharvest_field_agreement`) + matrix panel in Grafana.
+- **Postgres datasource in Grafana** alongside Prometheus, for high-cardinality entity-level panels.
+- **Entity-history Grafana dashboard** (`/d/webharvest-entity`) — drilldown per entity with sparklines and full change log.
+- **Schema builder UI** in React: add fields with name/type/volatile-toggle, JSON preview, model presets, "add and run" one-shot button.
+- **Per-source live cron editor** (UI inline) with presets (1m / 2m / 5m / 15m / 1h / 6h / off).
+- **`worker` container**: real API/worker split. Same image as scraper, different command (`python -m src.worker`). Reconciles per-source cron from Postgres every 30s.
+- **`FastPathHitRateLow` Prometheus alert**. Fires when a source's fast-path hit rate drops below 70% for 10m — the operational signal that anchors broke and need re-anchoring.
 
 ### Changed
 
-- `extracto` now accepts `model` per request body and labels every metric by model.
-- The "backend" string recorded in `runs.backend` is now the model slug (or "heuristic" historically) — Grafana groups everything by it.
-- Integration test rewritten for bake-off: uses gemini-flash + llama-70b on the JSON-LD and table fixtures (sub-cent per run). Now requires `OPENROUTER_API_KEY` in CI as a GitHub Secret.
+- The cron physically cannot trigger an LLM call. Once a source has cached anchors, every scheduled poll uses BS4 only — even if the anchors are broken. The user must explicitly invalidate via re-anchor to spend credits again.
+- Hybrid LLM call: a single request returns BOTH an anchor recipe AND up to 30 sample entities (verification + bootstrap). The recipe is the cost-saver; the sample is the fallback when BS4 verification fails.
+- HTML preprocessing: strip `<head>`, `<script>`, `<style>`, `<svg>`, `<noscript>`, comments BEFORE applying the byte cap. Most pages have 60-90% of bytes in those tags. Cap raised to 300KB; smart-trim now prefers `<main>` / `<article>` content.
+- User-Agent on the scraper switched to a realistic Chrome string. The default `python-httpx/X.Y` was getting rejected by Wikipedia's mirror checks.
+- Identity resolution: now derives from the first declared schema field by default. `identity_key` API field still works for composite keys (`["company", "filing_date"]`) — just not exposed in the UI for the common case.
 
 ### Removed
 
-- `services/heuristic/` and the runtime routing through it. The directory is gone; bringing the heuristic back as a ground-truth oracle on JSON-LD pages remains an option but is unimplemented.
-- `LOCAL_MODEL_URL`, `HEURISTIC_URL`, `LOCAL_CONFIDENCE_THRESHOLD`, `HEURISTIC_CONFIDENCE_THRESHOLD` env vars (no routing tier left to gate).
-- The CI lane for the heuristic Python service.
+- The previous "fall back to LLM-direct extraction every poll when anchors fail" behavior. Replaced with: persist anchors verbatim (broken or not), let next poll's BS4 produce 0 entities, surface as fast-path miss, require manual re-anchor.
 
 ### Migration note
 
-The `0.2.0` schema is incompatible with `0.1.x`. Wipe with `docker compose down -v` before bringing up.
+`db/init.sql` is incompatible with 0.2.x. Wipe with `docker compose down -v` before bringing up.
 
-## [0.1.0] — initial release
+## [0.2.0] — multi-model bake-off
+
+Replaced the heuristic-vs-cloud routing with a multi-model bake-off across four cloud LLMs (Claude Sonnet 4, GPT-4o, Llama 3.3 70B, Gemini 2.0 Flash) via OpenRouter. Every snapshot fans out to all configured models in parallel; the primary's entities are persisted, challengers run for measurement.
 
 ### Added
 
-- Five-service architecture in Docker Compose: scraper (Python/FastAPI), extracto (Node/Express + Anthropic SDK), local-model (Python heuristic extractor), dashboard (Vite + React), Postgres.
-- Local-first extraction with confidence-based escalation to the cloud LLM. Threshold tunable via `LOCAL_CONFIDENCE_THRESHOLD`.
-- Identity-keyed entity diffing with stale-not-deleted semantics. HTML snapshots persisted so schemas can be re-applied without re-fetching.
-- Prometheus metrics on every service. Auto-provisioned Grafana dashboard.
-- GitHub Actions workflows: `ci.yml`, `integration.yml`, `security.yml` (Trivy + pip-audit + npm audit + gitleaks), `deploy.yml` (GHCR + SLSA + SBOM on `v*` tags).
-- Dependabot for actions, pip, npm, Docker base images.
-- Documentation: README, ARCHITECTURE, EVALUATION, SWOT_ANALYSIS.
+- `sources.primary_model` + `sources.comparison_models[]`.
+- `webharvest_agreement_jaccard{source_id, primary, challenger}` set-level metric.
+- 4 Prometheus alert rules (drift, agreement, cost surge, stale spike).
+- Two-table demo fixture (`tests/integration/fixtures/`).
+- OpenRouter pricing table for the four models.
 
-### Scope simplifications vs. the original spec
+### Removed
 
-- Distilled local model replaced by a heuristic extractor (since superseded — see 0.2.0).
-- Web search step for source discovery omitted; sources are added by URL.
-- Wayback Machine training pipeline out of scope.
+- `services/heuristic/` and the heuristic-fallback routing. Cloud-only.
 
-[Unreleased]: https://github.com/ichanner/project-final/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/ichanner/project-final/releases/tag/v0.2.0
-[0.1.0]: https://github.com/ichanner/project-final/releases/tag/v0.1.0
+## [0.1.0] — initial release
+
+Five-service Docker Compose stack with a heuristic local extractor and Anthropic SDK cloud extractor. Confidence-based escalation. Original spec deliverables: `docker-compose.yml`, four GitHub Actions workflows, Trivy + audits + gitleaks, auto-provisioned Grafana, Dependabot.
+
+### Scope cuts vs. the original spec (carried forward to 0.3)
+
+- Distilled local model on llama.cpp — replaced first by a Python heuristic, then dropped entirely in 0.2.
+- Wayback Machine training pipeline — never built.
+- Web search source discovery — never built.
+- Pagination auto-detection — never built.

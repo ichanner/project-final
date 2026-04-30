@@ -250,6 +250,16 @@ input:focus, textarea:focus, select:focus { outline: none; border-color: var(--a
   max-width: 1100px; width: 100%; max-height: 85vh; overflow: hidden;
   display: flex; flex-direction: column;
 }
+/* policy alerts (Option A) */
+.policy-form { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.policy-form input, .policy-form select { padding: 6px 8px; }
+.rules-table { width: 100%; }
+.rules-table tr.disabled { opacity: 0.45; }
+.rules-table td { padding: 6px 10px; }
+.alert-feed { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow-y: auto; }
+.alert-line { display: flex; gap: 8px; align-items: center; padding: 4px 8px;
+  background: var(--bg-2); border-radius: 6px; font-size: 12px; flex-wrap: wrap; }
+
 .snapshot-html {
   background: #06080c; border: 1px solid var(--border);
   border-radius: 8px; padding: 14px; margin-top: 12px;

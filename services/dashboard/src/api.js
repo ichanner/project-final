@@ -20,6 +20,22 @@ export const deleteSource   = (sid)      => jsonFetch(`${BASE}/sources/${sid}`, 
 export const reAnchor       = (sid)      => jsonFetch(`${BASE}/sources/${sid}/re-anchor`, { method: "POST" });
 export const getAnchors     = (sid)      => jsonFetch(`${BASE}/sources/${sid}/anchors`);
 export const getSnapshot    = (sid)      => jsonFetch(`${BASE}/sources/${sid}/snapshot`);
+export const listAlertRules = (sid)      => jsonFetch(`${BASE}/sources/${sid}/alert-rules`);
+export const listAlerts     = (sid)      => jsonFetch(`${BASE}/sources/${sid}/alerts?limit=20`);
+export const createAlertRule = (sid, payload) =>
+  jsonFetch(`${BASE}/sources/${sid}/alert-rules`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+export const patchAlertRule = (rid, patch) =>
+  jsonFetch(`${BASE}/alert-rules/${rid}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+export const deleteAlertRule = (rid) =>
+  jsonFetch(`${BASE}/alert-rules/${rid}`, { method: "DELETE" });
 
 export const patchSource = (sid, patch) =>
   jsonFetch(`${BASE}/sources/${sid}`, {

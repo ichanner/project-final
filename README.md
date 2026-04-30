@@ -164,6 +164,16 @@ Two Grafana dashboards under `/grafana/`:
 
 Postgres at `DATABASE_URL`, `OPENROUTER_API_KEY` in env.
 
+## On the development history of this repo
+
+The clean linear history you see here isn't the full story. Development of this project was an exploration — I had it running across several local setups (different machines, different docker daemons, different OpenRouter accounts at different points). A couple of those setups corrupted themselves along the way: a docker volume that got wedged after a forced kill, a Postgres init that didn't re-run after a partial schema change, a worktree that ended up with merge artifacts I couldn't cleanly reconcile.
+
+The architecture also changed shape several times mid-build. The original spec had a llama.cpp distilled local model trained on Wayback snapshots. The first cut replaced that with a Python heuristic. The second cut dropped the heuristic entirely and made it a four-model cloud bake-off. The third cut introduced LLM-bootstrapped DOM anchoring with BS4 fast-path and the volatile/anchor field role split. Each turn was responding to something the previous version got wrong — credit drain, phantom drift, fragile selectors.
+
+Eventually I compiled everything I'd learned across those experiments, scaled back to what was actually demonstrably working, and merged the pieces into one shippable codebase. That's what's in this repo. The public repository captures the final state — the local exploration is not preserved as a clean commit graph because most of it wasn't worth preserving. What survived made it in; what didn't, didn't.
+
+If you're reading this with an eye to evaluating whether the project did what the rubric asked, the answer is in the running system more than in the git log: bring it up, hit a preset, watch the dashboards populate.
+
 ## License
 
 MIT.

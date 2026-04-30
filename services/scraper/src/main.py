@@ -304,6 +304,88 @@ def latest_snapshot(source_id: int, full: bool = False) -> dict[str, Any]:
     }
 
 
+# ---------- Per-entity policy alerts (Option A) ----------
+
+class AlertRuleIn(BaseModel):
+    name: str
+    entity_match: str | None = None  # NULL or '*' = match all entities
+    field: str
+    operator: str  # <, >, <=, >=, ==, !=, contains, !contains
+    threshold: str
+    enabled: bool = True
+
+
+@app.get("/sources/{source_id}/alert-rules")
+def list_alert_rules(source_id: int) -> list[dict[str, Any]]:
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT id, name, entity_match, field, operator, threshold, enabled, created_at "
+            "FROM entity_alert_rules WHERE source_id = %s ORDER BY id",
+            (source_id,),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row, strict=False)) for row in cur.fetchall()]
+
+
+@app.post("/sources/{source_id}/alert-rules", status_code=201)
+def create_alert_rule(source_id: int, rule: AlertRuleIn) -> dict[str, Any]:
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            "INSERT INTO entity_alert_rules "
+            "(source_id, name, entity_match, field, operator, threshold, enabled) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (source_id, rule.name, rule.entity_match, rule.field,
+             rule.operator, rule.threshold, rule.enabled),
+        )
+        rid = cur.fetchone()[0]
+    return {"id": rid}
+
+
+@app.patch("/alert-rules/{rule_id}")
+def update_alert_rule(rule_id: int, patch: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"name", "entity_match", "field", "operator", "threshold", "enabled"}
+    fields = {k: v for k, v in patch.items() if k in allowed}
+    if not fields:
+        raise HTTPException(status_code=400, detail="empty patch")
+    sets = [f"{k} = %s" for k in fields.keys()]
+    vals = list(fields.values()) + [rule_id]
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            f"UPDATE entity_alert_rules SET {', '.join(sets)} WHERE id = %s RETURNING id",
+            tuple(vals),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="rule not found")
+    return {"id": rule_id, "updated": list(fields.keys())}
+
+
+@app.delete("/alert-rules/{rule_id}")
+def delete_alert_rule(rule_id: int) -> dict[str, Any]:
+    with conn() as c, c.cursor() as cur:
+        cur.execute("DELETE FROM entity_alert_rules WHERE id = %s RETURNING id", (rule_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="rule not found")
+    return {"id": rule_id, "deleted": True}
+
+
+@app.get("/sources/{source_id}/alerts")
+def list_recent_alerts(source_id: int, limit: int = 50) -> list[dict[str, Any]]:
+    """Recent fires from policy evaluation. Newest first."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT a.id, a.rule_id, r.name AS rule_name, a.entity_identity, "
+            "a.field, a.operator, a.threshold, a.field_value, a.fired_at "
+            "FROM entity_alerts a "
+            "LEFT JOIN entity_alert_rules r ON r.id = a.rule_id "
+            "WHERE a.source_id = %s ORDER BY a.fired_at DESC LIMIT %s",
+            (source_id, limit),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row, strict=False)) for row in cur.fetchall()]
+
+
 @app.get("/sources/{source_id}/changes")
 def source_changes(source_id: int, limit: int = 200) -> list[dict[str, Any]]:
     """Source-level change feed across all entities."""

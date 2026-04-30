@@ -35,6 +35,7 @@ from .db import conn
 from .diff import identity_for
 from .dom_extractor import apply_anchors, verify_anchors
 from .fetcher import fetch
+from .policy import evaluate as evaluate_policy, load_rules as load_policy_rules
 from .metrics import (
     agreement_jaccard,
     escalations_total,
@@ -241,6 +242,23 @@ def _diff_and_persist(
             "src=%s rejected %s rows for anchor-field mismatch (extractor bound to wrong DOM row)",
             source_id, rejected_count,
         )
+
+    # Policy evaluation — per-entity rules fire here, on every poll, free.
+    rules = load_policy_rules(cur, source_id)
+    if rules:
+        # Build (entity_db_id, identity, data) tuples from this run's set.
+        eval_input: list[tuple[int, str, dict]] = []
+        for ent in entities:
+            ident = identity_for(ent, identity_key, schema_fields)
+            cur.execute(
+                "SELECT id FROM entities WHERE source_id = %s AND identity = %s",
+                (source_id, ident),
+            )
+            row = cur.fetchone()
+            if row:
+                eval_input.append((row[0], ident, ent))
+        evaluate_policy(cur, source_id, sid_label, primary_run_id, eval_input, rules)
+
     return new_count, updated_count, stale_count
 
 
@@ -294,6 +312,18 @@ async def run_source(source_id: int) -> dict[str, Any]:
     identity_key = list(identity_key or [])
     comparison_models = list(comparison_models or [])
     identity_field = identity_key[0] if identity_key else (anchor_fields[0] if anchor_fields else (schema_fields[0] if schema_fields else None))
+
+    # Pre-touch label combos so the time-series exist with value 0. Without
+    # this, an alert like `increase(...{change="stale"}[5m])` evaluates
+    # against zero series and stays inactive — even when a real stale event
+    # would otherwise fire it. Touching labels at .0 inc creates the series
+    # without affecting counter values.
+    for change in ("new", "updated", "stale"):
+        run_entities.labels(source_id=sid_label, change=change).inc(0)
+    for outcome in ("hit", "miss"):
+        fast_path_total.labels(source_id=sid_label, outcome=outcome).inc(0)
+    for outcome in ("ok", "error"):
+        fetch_total.labels(source_id=sid_label, outcome=outcome).inc(0)
 
     fetched = await _fetch_and_snapshot(source_id, url, sid_label)
     if isinstance(fetched, dict) and "_error" in fetched:

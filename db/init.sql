@@ -92,3 +92,44 @@ CREATE TABLE IF NOT EXISTS entity_changes (
 
 CREATE INDEX IF NOT EXISTS entity_changes_entity_idx ON entity_changes(entity_id, changed_at DESC);
 CREATE INDEX IF NOT EXISTS entity_changes_source_field_idx ON entity_changes(source_id, field, changed_at DESC);
+
+-- Per-entity policy rules: "alert when Hyperliquid price_usd drops below 30."
+-- Evaluated for free on every fast-path poll — no extra LLM cost. The
+-- enabled flag lets you tune thresholds without losing rule history.
+CREATE TABLE IF NOT EXISTS entity_alert_rules (
+    id           BIGSERIAL PRIMARY KEY,
+    source_id    BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    -- entity_match: NULL or '*' = match every entity in the source.
+    -- Otherwise: case-insensitive substring match against entities.identity.
+    entity_match TEXT,
+    field        TEXT NOT NULL,
+    -- Operators: "<", ">", "<=", ">=", "==", "!=" on the parsed numeric
+    -- value of the field. "contains", "!contains" on the string form.
+    operator     TEXT NOT NULL,
+    threshold    TEXT NOT NULL,
+    enabled      BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS entity_alert_rules_source_idx ON entity_alert_rules(source_id, enabled);
+
+-- Each evaluation that resolves to "fire" gets a row here. Lets the UI
+-- show a feed of recent fires + Grafana SQL panels do trend analysis on
+-- which rules are noisy.
+CREATE TABLE IF NOT EXISTS entity_alerts (
+    id              BIGSERIAL PRIMARY KEY,
+    rule_id         BIGINT NOT NULL REFERENCES entity_alert_rules(id) ON DELETE CASCADE,
+    source_id       BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    run_id          BIGINT REFERENCES runs(id) ON DELETE SET NULL,
+    entity_id       BIGINT REFERENCES entities(id) ON DELETE SET NULL,
+    entity_identity TEXT NOT NULL,
+    field           TEXT NOT NULL,
+    field_value     TEXT,
+    threshold       TEXT,
+    operator        TEXT,
+    fired_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS entity_alerts_source_idx ON entity_alerts(source_id, fired_at DESC);
+CREATE INDEX IF NOT EXISTS entity_alerts_rule_idx ON entity_alerts(rule_id, fired_at DESC);
