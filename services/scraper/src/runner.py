@@ -1,4 +1,12 @@
-"""Run a scrape: fetch -> snapshot -> extract -> diff -> persist."""
+"""Run a scrape: fetch -> snapshot -> extract -> diff -> persist.
+
+The extraction tier:
+  1. Heuristic service runs first. Free, ~50ms, good on JSON-LD and clean tables.
+  2. If heuristic confidence is below HEURISTIC_CONFIDENCE_THRESHOLD, escalate
+     to extracto with the source's chosen cloud model (claude/gpt-4o/llama/etc).
+The "backend" string we record in the DB is either "heuristic" or the model
+name — that's what Grafana groups by.
+"""
 
 from __future__ import annotations
 
@@ -23,21 +31,26 @@ from .metrics import (
 )
 
 EXTRACTO_URL = os.environ.get("EXTRACTO_URL", "http://extracto:8081")
-LOCAL_MODEL_URL = os.environ.get("LOCAL_MODEL_URL", "http://local-model:8082")
-LOCAL_CONFIDENCE_THRESHOLD = float(os.environ.get("LOCAL_CONFIDENCE_THRESHOLD", "0.7"))
+HEURISTIC_URL = os.environ.get("HEURISTIC_URL", "http://heuristic:8082")
+HEURISTIC_CONFIDENCE_THRESHOLD = float(
+    os.environ.get("HEURISTIC_CONFIDENCE_THRESHOLD", "0.7")
+)
 
 
-async def _extract(html: str, schema: dict, anchor: str | None) -> dict[str, Any]:
-    """Try local model first; escalate to extracto/cloud on low confidence."""
+async def _extract(
+    html: str, schema: dict, anchor: str | None, model: str | None
+) -> dict[str, Any]:
+    """Try heuristic first; escalate to a cloud model on low confidence."""
     payload = {"html": html, "schema": schema, "anchor": anchor}
-    backend = "local"
+    backend = "heuristic"
     confidence = 0.0
     entities: list[dict] = []
     cost_usd = 0.0
+    heuristic_error: str | None = None
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=180.0) as client:
         try:
-            r = await client.post(f"{LOCAL_MODEL_URL}/extract", json=payload)
+            r = await client.post(f"{HEURISTIC_URL}/extract", json=payload)
             r.raise_for_status()
             data = r.json()
             entities = data.get("entities", [])
@@ -45,25 +58,26 @@ async def _extract(html: str, schema: dict, anchor: str | None) -> dict[str, Any
         except Exception as e:  # noqa: BLE001
             confidence = 0.0
             entities = []
-            local_error = str(e)
-        else:
-            local_error = None
+            heuristic_error = str(e)
 
-        if confidence < LOCAL_CONFIDENCE_THRESHOLD:
-            backend = "cloud"
-            r = await client.post(f"{EXTRACTO_URL}/extract", json=payload)
+        if confidence < HEURISTIC_CONFIDENCE_THRESHOLD:
+            cloud_payload = {**payload, "model": model} if model else payload
+            r = await client.post(f"{EXTRACTO_URL}/extract", json=cloud_payload)
             r.raise_for_status()
             data = r.json()
             entities = data.get("entities", [])
             confidence = float(data.get("confidence", 0.0))
             cost_usd = float(data.get("cost_usd", 0.0))
+            # extracto echoes back the model it actually used; that's our
+            # backend label. Falls back to the requested model if missing.
+            backend = data.get("model") or model or "cloud"
 
     return {
         "backend": backend,
         "confidence": confidence,
         "entities": entities,
         "cost_usd": cost_usd,
-        "local_error": local_error,
+        "heuristic_error": heuristic_error,
     }
 
 
@@ -71,13 +85,13 @@ async def run_source(source_id: int) -> dict[str, Any]:
     """Run a full scrape pipeline for a single source. Returns run summary."""
     with conn() as c, c.cursor() as cur:
         cur.execute(
-            "SELECT url, schema, anchor, identity_key FROM sources WHERE id = %s",
+            "SELECT url, schema, anchor, identity_key, model FROM sources WHERE id = %s",
             (source_id,),
         )
         row = cur.fetchone()
         if not row:
             raise ValueError(f"source {source_id} not found")
-        url, schema, anchor, identity_key = row
+        url, schema, anchor, identity_key, model = row
 
     sid_label = str(source_id)
 
@@ -114,15 +128,15 @@ async def run_source(source_id: int) -> dict[str, Any]:
         run_id = cur.fetchone()[0]
 
     # Extract
-    backend_in_use.labels(backend="local").set(1)
+    backend_in_use.labels(backend="heuristic").set(1)
     try:
-        result = await _extract(html, schema or {}, anchor)
+        result = await _extract(html, schema or {}, anchor, model)
     finally:
-        backend_in_use.labels(backend="local").set(0)
+        backend_in_use.labels(backend="heuristic").set(0)
 
     backend = result["backend"]
-    if backend == "cloud":
-        escalations_total.labels(source_id=sid_label).inc()
+    if backend != "heuristic":
+        escalations_total.labels(source_id=sid_label, model=backend).inc()
 
     confidence = result["confidence"]
     cost_usd = result["cost_usd"]
@@ -133,12 +147,10 @@ async def run_source(source_id: int) -> dict[str, Any]:
 
     # Diff + persist
     new_count = updated_count = stale_count = 0
-    seen_identities: set[str] = set()
 
     with conn() as c, c.cursor() as cur:
         for ent in entities:
             ident = identity_for(ent, list(identity_key))
-            seen_identities.add(ident)
             cur.execute(
                 "SELECT id, data FROM entities WHERE source_id = %s AND identity = %s",
                 (source_id, ident),
@@ -168,7 +180,6 @@ async def run_source(source_id: int) -> dict[str, Any]:
                         (run_id, old_id),
                     )
 
-        # Mark anything we didn't see this run as stale (don't delete).
         cur.execute(
             "UPDATE entities SET stale = TRUE WHERE source_id = %s AND last_run_id != %s "
             "RETURNING 1",

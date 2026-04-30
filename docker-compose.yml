@@ -15,8 +15,8 @@ services:
       timeout: 5s
       retries: 10
 
-  local-model:
-    build: ./services/local-model
+  heuristic:
+    build: ./services/heuristic
     restart: unless-stopped
     expose: ["8082"]
 
@@ -25,7 +25,7 @@ services:
     restart: unless-stopped
     environment:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
-      EXTRACTO_MODEL: ${EXTRACTO_MODEL:-anthropic/claude-sonnet-4}
+      EXTRACTO_DEFAULT_MODEL: ${EXTRACTO_DEFAULT_MODEL:-anthropic/claude-sonnet-4}
     expose: ["8081"]
 
   scraper:
@@ -34,12 +34,12 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       extracto: { condition: service_started }
-      local-model: { condition: service_started }
+      heuristic: { condition: service_started }
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-webharvest}:${POSTGRES_PASSWORD:-webharvest}@postgres:5432/${POSTGRES_DB:-webharvest}
       EXTRACTO_URL: http://extracto:8081
-      LOCAL_MODEL_URL: http://local-model:8082
-      LOCAL_CONFIDENCE_THRESHOLD: ${LOCAL_CONFIDENCE_THRESHOLD:-0.7}
+      HEURISTIC_URL: http://heuristic:8082
+      HEURISTIC_CONFIDENCE_THRESHOLD: ${HEURISTIC_CONFIDENCE_THRESHOLD:-0.7}
       SCRAPER_REFRESH_CRON: ${SCRAPER_REFRESH_CRON:-0 */6 * * *}
     expose: ["8080"]
 

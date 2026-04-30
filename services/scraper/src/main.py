@@ -29,8 +29,12 @@ class SourceIn(BaseModel):
     anchor: str | None = None
     identity_key: list[str] = Field(default_factory=list)
     refresh_cron: str | None = None
+    # Optional: which OpenRouter model to escalate to. If omitted, the source
+    # uses the extracto service's default. We pass the slug straight through
+    # (e.g. "anthropic/claude-sonnet-4", "openai/gpt-4o").
+    model: str | None = None
 
-    model_config = {"populate_by_name": True}
+    model_config = {"populate_by_name": True, "protected_namespaces": ()}
 
 
 @asynccontextmanager
@@ -80,7 +84,8 @@ def metrics() -> Response:
 def list_sources() -> list[dict[str, Any]]:
     with conn() as c, c.cursor() as cur:
         cur.execute(
-            "SELECT id, url, label, identity_key, refresh_cron, created_at FROM sources ORDER BY id"
+            "SELECT id, url, label, identity_key, refresh_cron, model, created_at "
+            "FROM sources ORDER BY id"
         )
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row, strict=False)) for row in cur.fetchall()]
@@ -90,12 +95,12 @@ def list_sources() -> list[dict[str, Any]]:
 def create_source(src: SourceIn) -> dict[str, Any]:
     with conn() as c, c.cursor() as cur:
         cur.execute(
-            "INSERT INTO sources (url, label, schema, anchor, identity_key, refresh_cron) "
-            "VALUES (%s, %s, %s, %s, %s, %s) "
+            "INSERT INTO sources (url, label, schema, anchor, identity_key, refresh_cron, model) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (url) DO UPDATE SET label = EXCLUDED.label, "
             "schema = EXCLUDED.schema, anchor = EXCLUDED.anchor, "
             "identity_key = EXCLUDED.identity_key, refresh_cron = EXCLUDED.refresh_cron, "
-            "updated_at = now() RETURNING id",
+            "model = EXCLUDED.model, updated_at = now() RETURNING id",
             (
                 src.url,
                 src.label,
@@ -103,6 +108,7 @@ def create_source(src: SourceIn) -> dict[str, Any]:
                 src.anchor,
                 src.identity_key,
                 src.refresh_cron,
+                src.model,
             ),
         )
         sid = cur.fetchone()[0]

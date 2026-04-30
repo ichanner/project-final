@@ -3,13 +3,28 @@ import { createSource, listEntities, listRuns, listSources, triggerRun } from ".
 
 const fmt = (d) => (d ? new Date(d).toLocaleString() : "—");
 
+// Short label for the long OpenRouter model slugs.
+const shortModel = (m) => {
+  if (!m) return "—";
+  if (m === "heuristic") return "heuristic";
+  // "anthropic/claude-sonnet-4" -> "claude-sonnet-4"
+  return m.includes("/") ? m.split("/").slice(-1)[0] : m;
+};
+
+function BackendBadge({ backend, error }) {
+  if (error) return <span className="badge err">error</span>;
+  if (!backend) return <span className="muted">—</span>;
+  const cls = backend === "heuristic" ? "badge local" : "badge cloud";
+  return <span className={cls} title={backend}>{shortModel(backend)}</span>;
+}
+
 function Sources({ sources, onRun, onSelect, busyId }) {
   return (
     <div className="panel">
       <h2>Sources</h2>
       <table>
         <thead>
-          <tr><th>ID</th><th>Label</th><th>URL</th><th>Identity key</th><th></th></tr>
+          <tr><th>ID</th><th>Label</th><th>URL</th><th>Model</th><th>Identity key</th><th></th></tr>
         </thead>
         <tbody>
           {sources.map((s) => (
@@ -17,6 +32,7 @@ function Sources({ sources, onRun, onSelect, busyId }) {
               <td>{s.id}</td>
               <td>{s.label || <span className="muted">—</span>}</td>
               <td><a href={s.url} target="_blank" rel="noreferrer">{s.url}</a></td>
+              <td className="muted">{shortModel(s.model)}</td>
               <td className="muted">{(s.identity_key || []).join(", ") || "—"}</td>
               <td className="row">
                 <button onClick={() => onRun(s.id)} disabled={busyId === s.id}>
@@ -50,11 +66,7 @@ function Runs({ runs }) {
               <td>{r.source_id}</td>
               <td>{fmt(r.started_at)}</td>
               <td>{fmt(r.finished_at)}</td>
-              <td>
-                {r.error ? <span className="badge err">error</span>
-                  : r.backend === "cloud" ? <span className="badge cloud">cloud</span>
-                  : <span className="badge local">local</span>}
-              </td>
+              <td><BackendBadge backend={r.backend} error={r.error} /></td>
               <td>{r.confidence != null ? Number(r.confidence).toFixed(2) : "—"}</td>
               <td>{r.entity_count ?? 0}</td>
               <td className="muted">{r.new_count ?? 0}/{r.updated_count ?? 0}/{r.stale_count ?? 0}</td>
@@ -109,10 +121,19 @@ function Entities({ sourceId, entities }) {
   );
 }
 
+const MODEL_CHOICES = [
+  "",
+  "anthropic/claude-sonnet-4",
+  "openai/gpt-4o",
+  "meta-llama/llama-3.3-70b-instruct",
+  "google/gemini-2.0-flash-001",
+];
+
 function NewSourceForm({ onCreated }) {
   const [url, setUrl] = useState("");
   const [label, setLabel] = useState("");
   const [identityKey, setIdentityKey] = useState("");
+  const [model, setModel] = useState("");
   const [busy, setBusy] = useState(false);
 
   const submit = async (e) => {
@@ -124,8 +145,9 @@ function NewSourceForm({ onCreated }) {
         url,
         label: label || null,
         identity_key: identityKey ? identityKey.split(",").map((s) => s.trim()).filter(Boolean) : [],
+        model: model || null,
       });
-      setUrl(""); setLabel(""); setIdentityKey("");
+      setUrl(""); setLabel(""); setIdentityKey(""); setModel("");
       onCreated();
     } finally {
       setBusy(false);
@@ -139,6 +161,11 @@ function NewSourceForm({ onCreated }) {
         <input className="grow" placeholder="https://example.com/listings" value={url} onChange={(e) => setUrl(e.target.value)} />
         <input placeholder="Label (optional)" value={label} onChange={(e) => setLabel(e.target.value)} />
         <input placeholder="Identity key (comma-separated)" value={identityKey} onChange={(e) => setIdentityKey(e.target.value)} />
+        <select value={model} onChange={(e) => setModel(e.target.value)}>
+          {MODEL_CHOICES.map((m) => (
+            <option key={m} value={m}>{m ? shortModel(m) : "default model"}</option>
+          ))}
+        </select>
         <button disabled={busy || !url}>{busy ? "Adding…" : "Add"}</button>
       </div>
     </form>

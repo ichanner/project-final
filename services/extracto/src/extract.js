@@ -1,4 +1,4 @@
-import { client, MODEL, estimateCost } from "./anthropicClient.js";
+import { client, DEFAULT_MODEL, estimateCost } from "./anthropicClient.js";
 
 const SYSTEM_PROMPT = `You are a structured-data extractor. You receive raw HTML from a single web page and a description of the data the user wants. Your job is to find the repeating structured region (table, card grid, list, etc.) that matches the description and return the entities as a JSON array.
 
@@ -6,7 +6,8 @@ Rules:
 - Anchor on semantics ("the rate filings table") rather than CSS selectors. The site may redesign without notice.
 - Each entity must conform to the provided schema. If a field is missing on a page, use null — do not invent values.
 - Return a confidence score in [0, 1] for the extraction as a whole. Use lower confidence when the page does not appear to contain the expected region.
-- Skip header rows, navigation chrome, ads, and footers.`;
+- Skip header rows, navigation chrome, ads, and footers.
+- Reply with ONLY the JSON object. No prose, no commentary, no markdown fences.`;
 
 const HTML_HARD_CAP = 200_000;
 
@@ -46,7 +47,9 @@ function buildOutputSchema(userSchema) {
   };
 }
 
-export async function extract({ html, schema, anchor }) {
+export async function extract({ html, schema, anchor, model }) {
+  const useModel = model || DEFAULT_MODEL;
+
   const description = anchor
     ? `Find the region described as: "${anchor}". Extract every entity in that region.`
     : "Find the most prominent repeating data region on the page and extract its entities.";
@@ -65,7 +68,7 @@ export async function extract({ html, schema, anchor }) {
   const outputSchema = buildOutputSchema(schema);
 
   const response = await client.chat.completions.create({
-    model: MODEL,
+    model: useModel,
     max_tokens: 16000,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
@@ -81,11 +84,9 @@ export async function extract({ html, schema, anchor }) {
     },
   });
 
+  // Several OpenRouter providers ignore response_format and return either raw
+  // JSON, fenced JSON, or JSON inside chain-of-thought prose. Handle all three.
   const content = response.choices?.[0]?.message?.content ?? "";
-  // Some OpenRouter providers (notably Claude via Bedrock) ignore the
-  // response_format: json_schema and embed the JSON in a ```json ... ``` block
-  // surrounded by chain-of-thought prose. Extract the fenced block, otherwise
-  // fall back to the largest JSON-looking substring.
   let payload = content.trim();
   const fenceMatch = payload.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
   if (fenceMatch) {
@@ -103,11 +104,10 @@ export async function extract({ html, schema, anchor }) {
   }
 
   return {
-    backend: "cloud",
-    model: MODEL,
+    model: useModel,
     entities: parsed.entities ?? [],
     confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.8,
-    cost_usd: estimateCost(response.usage),
+    cost_usd: estimateCost(useModel, response.usage),
     usage: response.usage,
   };
 }

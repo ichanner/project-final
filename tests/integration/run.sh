@@ -46,7 +46,7 @@ run_fixture() {
   entity_count=$(echo "$run_resp" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("entity_count", 0))')
   new_count=$(echo "$run_resp" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("new", 0))')
 
-  [ "$backend" = "local" ] || { echo "FAIL: expected local backend, got $backend (escalation triggered — heuristic confidence below threshold)" >&2; exit 1; }
+  [ "$backend" = "heuristic" ] || { echo "FAIL: expected heuristic backend, got $backend (escalation triggered — heuristic confidence below threshold)" >&2; exit 1; }
   [ "$entity_count" -ge "$min_count" ] || { echo "FAIL: expected >=$min_count entities, got $entity_count" >&2; exit 1; }
   [ "$new_count" -ge "$min_new" ] || { echo "FAIL: expected >=$min_new new entities on first run, got $new_count" >&2; exit 1; }
 

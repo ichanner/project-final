@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [scraper, local-model]
+        service: [scraper, heuristic]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -49,7 +49,7 @@ jobs:
       security-events: write
     strategy:
       matrix:
-        service: [scraper, extracto, local-model, dashboard]
+        service: [scraper, extracto, heuristic, dashboard]
     steps:
       - uses: actions/checkout@v4
       - name: Build image

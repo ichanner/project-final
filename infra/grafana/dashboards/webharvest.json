@@ -29,7 +29,7 @@
     {
       "id": 3,
       "type": "timeseries",
-      "title": "Confidence distribution (avg by backend)",
+      "title": "Confidence by backend (p50 / p95)",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
       "targets": [
         { "expr": "histogram_quantile(0.5, sum by(le, backend) (rate(webharvest_scraper_run_confidence_bucket[5m])))", "legendFormat": "p50 {{backend}}", "refId": "A" },
@@ -39,50 +39,73 @@
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Cost per source (USD/hour)",
+      "title": "Cost by model (USD/hr)",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
       "targets": [
-        { "expr": "sum by(source_id) (rate(webharvest_scraper_cost_usd_total[1h]) * 3600)", "legendFormat": "src {{source_id}}", "refId": "A" }
-      ]
+        { "expr": "sum by(model) (rate(extracto_cost_usd_total[1h]) * 3600)", "legendFormat": "{{model}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } }
     },
     {
       "id": 5,
       "type": "timeseries",
-      "title": "Fetch duration (p95)",
+      "title": "Fetch p95 by source",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
       "targets": [
         { "expr": "histogram_quantile(0.95, sum by(le, source_id) (rate(webharvest_scraper_fetch_duration_seconds_bucket[5m])))", "legendFormat": "src {{source_id}}", "refId": "A" }
-      ]
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
     },
     {
       "id": 6,
       "type": "timeseries",
-      "title": "Cloud escalation rate",
+      "title": "Escalation rate to cloud (per model)",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
       "targets": [
-        { "expr": "rate(webharvest_scraper_escalations_total[5m])", "legendFormat": "src {{source_id}}", "refId": "A" }
+        { "expr": "sum by(model) (rate(webharvest_scraper_escalations_total[5m]))", "legendFormat": "{{model}}", "refId": "A" }
       ]
     },
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Extracto tokens/sec",
+      "title": "Tokens/sec by model",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
       "targets": [
-        { "expr": "sum by(kind) (rate(extracto_tokens_total[5m]))", "legendFormat": "{{kind}}", "refId": "A" }
+        { "expr": "sum by(model, kind) (rate(extracto_tokens_total[5m]))", "legendFormat": "{{model}} {{kind}}", "refId": "A" }
       ]
     },
     {
       "id": 8,
       "type": "timeseries",
-      "title": "Extract latency (p50/p95)",
+      "title": "Extraction latency p95 (heuristic vs each model)",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
       "targets": [
-        { "expr": "histogram_quantile(0.5, sum by(le) (rate(extracto_extract_duration_seconds_bucket[5m])))", "legendFormat": "p50 cloud", "refId": "A" },
-        { "expr": "histogram_quantile(0.95, sum by(le) (rate(extracto_extract_duration_seconds_bucket[5m])))", "legendFormat": "p95 cloud", "refId": "B" },
-        { "expr": "histogram_quantile(0.5, sum by(le) (rate(local_model_extract_duration_seconds_bucket[5m])))", "legendFormat": "p50 local", "refId": "C" },
-        { "expr": "histogram_quantile(0.95, sum by(le) (rate(local_model_extract_duration_seconds_bucket[5m])))", "legendFormat": "p95 local", "refId": "D" }
-      ]
+        { "expr": "histogram_quantile(0.95, sum by(le, model) (rate(extracto_extract_duration_seconds_bucket[5m])))", "legendFormat": "{{model}} p95", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum by(le) (rate(heuristic_extract_duration_seconds_bucket[5m])))", "legendFormat": "heuristic p95", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Total spend (this dashboard window)",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 30 },
+      "targets": [
+        { "expr": "sum(extracto_cost_usd_total)", "legendFormat": "total $", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area" }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Spend by model (USD)",
+      "gridPos": { "h": 6, "w": 16, "x": 8, "y": 30 },
+      "targets": [
+        { "expr": "sum by(model) (extracto_cost_usd_total)", "legendFormat": "{{model}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area" }
     }
   ],
   "refresh": "10s",
@@ -94,6 +117,6 @@
   "timezone": "",
   "title": "WebHarvest",
   "uid": "webharvest",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

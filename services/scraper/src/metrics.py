@@ -39,6 +39,6 @@ backend_in_use = Gauge(
 
 escalations_total = Counter(
     "webharvest_scraper_escalations_total",
-    "Local-model escalations to cloud",
-    ["source_id"],
+    "Heuristic escalations to a cloud model, by model",
+    ["source_id", "model"],
 )

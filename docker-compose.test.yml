@@ -1,6 +1,10 @@
-# Overlay used by integration tests. Adds a static-HTML fixture server and
-# exposes the scraper API on the host. Use:
+# Overlay used by integration tests AND for demoing the JSON-LD/table fixtures.
+# Adds a static-HTML fixture server and exposes the scraper API on the host. Use:
 #   docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build
+#
+# Note: this overlay does NOT clobber OPENROUTER_API_KEY — the integration test
+# only exercises the heuristic path, but a demo using the same overlay should
+# still be able to escalate to a cloud model.
 services:
   fixture:
     image: nginx:1.27-alpine
@@ -20,9 +24,5 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       extracto: { condition: service_started }
-      local-model: { condition: service_started }
+      heuristic: { condition: service_started }
       fixture: { condition: service_healthy }
-
-  extracto:
-    environment:
-      ANTHROPIC_API_KEY: dummy-not-used-in-integration-test

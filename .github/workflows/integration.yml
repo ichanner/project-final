@@ -36,7 +36,7 @@ jobs:
         run: |
           echo "::group::scraper" && docker compose logs scraper && echo "::endgroup::"
           echo "::group::extracto" && docker compose logs extracto && echo "::endgroup::"
-          echo "::group::local-model" && docker compose logs local-model && echo "::endgroup::"
+          echo "::group::heuristic" && docker compose logs heuristic && echo "::endgroup::"
           echo "::group::postgres" && docker compose logs postgres && echo "::endgroup::"
           echo "::group::fixture" && docker compose logs fixture && echo "::endgroup::"
 

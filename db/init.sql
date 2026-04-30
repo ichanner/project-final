@@ -9,6 +9,10 @@ CREATE TABLE IF NOT EXISTS sources (
     identity_key TEXT[] NOT NULL DEFAULT '{}',
     pagination   JSONB NOT NULL DEFAULT '{}'::jsonb,
     refresh_cron TEXT,
+    -- Which OpenRouter model this source escalates to when the heuristic
+    -- can't get a confident extraction. NULL falls back to extracto's
+    -- EXTRACTO_DEFAULT_MODEL env var.
+    model        TEXT,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );

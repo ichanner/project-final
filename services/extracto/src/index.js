@@ -1,14 +1,14 @@
 import express from "express";
 
 import { extract } from "./extract.js";
-import { MODEL } from "./anthropicClient.js";
+import { DEFAULT_MODEL } from "./anthropicClient.js";
 import { extractCost, extractDuration, extractTokens, register } from "./metrics.js";
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", model: MODEL });
+  res.json({ status: "ok", default_model: DEFAULT_MODEL });
 });
 
 app.get("/metrics", async (_req, res) => {
@@ -17,34 +17,35 @@ app.get("/metrics", async (_req, res) => {
 });
 
 app.post("/extract", async (req, res) => {
-  const { html, schema, anchor } = req.body ?? {};
+  const { html, schema, anchor, model } = req.body ?? {};
   if (typeof html !== "string" || html.length === 0) {
     return res.status(400).json({ error: "html (string) required" });
   }
 
+  const useModel = model || DEFAULT_MODEL;
   const startedAt = process.hrtime.bigint();
   let outcome = "ok";
   try {
-    const result = await extract({ html, schema, anchor });
+    const result = await extract({ html, schema, anchor, model: useModel });
 
     if (result.usage) {
-      extractTokens.labels(MODEL, "input").inc(result.usage.prompt_tokens ?? 0);
-      extractTokens.labels(MODEL, "output").inc(result.usage.completion_tokens ?? 0);
+      extractTokens.labels(useModel, "input").inc(result.usage.prompt_tokens ?? 0);
+      extractTokens.labels(useModel, "output").inc(result.usage.completion_tokens ?? 0);
     }
-    extractCost.labels(MODEL).inc(result.cost_usd);
+    extractCost.labels(useModel).inc(result.cost_usd);
 
     res.json(result);
   } catch (err) {
     outcome = "error";
-    console.error("extract failed:", err);
-    res.status(500).json({ error: err.message ?? String(err) });
+    console.error(`extract failed (model=${useModel}):`, err.message ?? err);
+    res.status(500).json({ error: err.message ?? String(err), model: useModel });
   } finally {
     const elapsed = Number(process.hrtime.bigint() - startedAt) / 1e9;
-    extractDuration.labels(MODEL, outcome).observe(elapsed);
+    extractDuration.labels(useModel, outcome).observe(elapsed);
   }
 });
 
 const port = Number(process.env.PORT ?? 8081);
 app.listen(port, "0.0.0.0", () => {
-  console.log(`extracto listening on :${port} model=${MODEL}`);
+  console.log(`extracto listening on :${port} default_model=${DEFAULT_MODEL}`);
 });

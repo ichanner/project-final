@@ -9,16 +9,16 @@ from starlette.responses import Response
 
 from .heuristics import extract
 
-app = FastAPI(title="WebHarvest Local Model")
+app = FastAPI(title="WebHarvest Heuristic Extractor")
 
 extract_duration = Histogram(
-    "local_model_extract_duration_seconds",
-    "Local extraction duration",
+    "heuristic_extract_duration_seconds",
+    "Heuristic extraction duration",
     ["source"],
 )
 extract_outcomes = Counter(
-    "local_model_extract_outcomes_total",
-    "Outcomes by extraction source",
+    "heuristic_extract_outcomes_total",
+    "Outcomes by extraction source (jsonld, table, cards, none)",
     ["source"],
 )
 

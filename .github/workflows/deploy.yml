@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [scraper, extracto, local-model, dashboard]
+        service: [scraper, extracto, heuristic, dashboard]
     steps:
       - uses: actions/checkout@v4
 
@@ -79,7 +79,7 @@ jobs:
 
             - `ghcr.io/${{ github.repository_owner }}/web-harvest-scraper:${{ github.ref_name }}`
             - `ghcr.io/${{ github.repository_owner }}/web-harvest-extracto:${{ github.ref_name }}`
-            - `ghcr.io/${{ github.repository_owner }}/web-harvest-local-model:${{ github.ref_name }}`
+            - `ghcr.io/${{ github.repository_owner }}/web-harvest-heuristic:${{ github.ref_name }}`
             - `ghcr.io/${{ github.repository_owner }}/web-harvest-dashboard:${{ github.ref_name }}`
 
             Each image carries a SLSA provenance attestation and SBOM (visible under "Verified" in the GHCR UI).
