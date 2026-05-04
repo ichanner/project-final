@@ -55,7 +55,7 @@ jobs:
       - name: Build image
         run: docker build -t webharvest-${{ matrix.service }}:ci services/${{ matrix.service }}
       - name: Trivy scan
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@0.36.0
         with:
           image-ref: webharvest-${{ matrix.service }}:ci
           format: sarif
@@ -71,7 +71,7 @@ jobs:
           category: trivy-${{ matrix.service }}
 
       - name: Generate SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@0.36.0
         with:
           image-ref: webharvest-${{ matrix.service }}:ci
           format: cyclonedx
@@ -93,7 +93,7 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4
-      - uses: aquasecurity/trivy-action@0.24.0
+      - uses: aquasecurity/trivy-action@0.36.0
         with:
           scan-type: fs
           scan-ref: .
