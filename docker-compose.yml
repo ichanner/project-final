@@ -46,6 +46,16 @@ services:
       WORKER_METRICS_PORT: "8083"
     command: ["python", "-m", "src.worker"]
     expose: ["8083"]
+    # Override the scraper Dockerfile's HEALTHCHECK (which targets the
+    # FastAPI /health on :8080). The worker is a long-lived APScheduler
+    # process that only exposes /metrics on :8083 — so the inherited
+    # healthcheck would always fail.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/metrics > /dev/null"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
 
   dashboard:
     build: ./services/dashboard

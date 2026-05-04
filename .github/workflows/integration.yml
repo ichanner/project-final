@@ -24,7 +24,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 
       - name: Print service status
-        run: docker compose ps
+        run: docker compose -f docker-compose.yml -f docker-compose.test.yml ps
 
       - name: Run integration test
         run: bash tests/integration/run.sh
@@ -35,10 +35,12 @@ jobs:
       - name: Dump logs on failure
         if: failure()
         run: |
-          echo "::group::scraper" && docker compose logs scraper && echo "::endgroup::"
-          echo "::group::extracto" && docker compose logs extracto && echo "::endgroup::"
-          echo "::group::postgres" && docker compose logs postgres && echo "::endgroup::"
-          echo "::group::fixture" && docker compose logs fixture && echo "::endgroup::"
+          COMPOSE="docker compose -f docker-compose.yml -f docker-compose.test.yml"
+          echo "::group::scraper"   && $COMPOSE logs scraper   && echo "::endgroup::"
+          echo "::group::worker"    && $COMPOSE logs worker    && echo "::endgroup::"
+          echo "::group::extracto"  && $COMPOSE logs extracto  && echo "::endgroup::"
+          echo "::group::postgres"  && $COMPOSE logs postgres  && echo "::endgroup::"
+          echo "::group::fixture"   && $COMPOSE logs fixture   && echo "::endgroup::"
 
       - name: Tear down
         if: always()
