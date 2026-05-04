@@ -1,289 +1,381 @@
 {
-  "annotations": {
-    "list": [
-      {
-        "name": "Field changes",
-        "datasource": { "type": "prometheus", "uid": "prometheus" },
-        "enable": true,
-        "iconColor": "rgba(245, 176, 66, 0.9)",
-        "expr": "increase(webharvest_field_changes_total[1m]) > 0",
-        "step": "30s",
-        "tagKeys": "source_id,field",
-        "titleFormat": "{{field}} changed on src {{source_id}}",
-        "useValueForTime": false
-      }
-    ]
-  },
+  "annotations": { "list": [] },
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
   "links": [],
-  "liveNow": false,
+  "liveNow": true,
   "panels": [
-
-    { "id": 100, "type": "row", "title": "Diff & drift", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "collapsed": false, "panels": [] },
-
+    {
+      "id": 100,
+      "type": "row",
+      "title": "System Health",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
     {
       "id": 1,
       "type": "stat",
-      "title": "Field changes (last 1h)",
+      "title": "Polls / min",
+      "description": "Worker/API poll throughput across all sources.",
       "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "expr": "sum(increase(webharvest_field_changes_total[1h]))", "refId": "A" }
+        { "expr": "sum(rate(webharvest_poll_total[5m]) * 60) or vector(0)", "refId": "A" }
       ],
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [
-        {"color": "green", "value": null}, {"color": "yellow", "value": 5}, {"color": "orange", "value": 50}
-      ]}}}
+      "fieldConfig": { "defaults": { "unit": "/min", "decimals": 2 } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" }
     },
     {
       "id": 2,
       "type": "stat",
-      "title": "Updated entities (last 1h)",
+      "title": "Fetch errors / min",
+      "description": "Network, HTTP, SSL, anti-bot, and transport failures.",
       "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "expr": "sum(increase(webharvest_scraper_run_entities_total{change=\"updated\"}[1h]))", "refId": "A" }
-      ],
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area" }
-    },
-    {
-      "id": 3,
-      "type": "stat",
-      "title": "Active sources (have run in last 10m)",
-      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "expr": "count(count by(source_id) (rate(webharvest_scraper_fetch_total[10m]) > 0))", "refId": "A" }
-      ],
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
-    },
-    {
-      "id": 4,
-      "type": "stat",
-      "title": "Total spend (window)",
-      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "expr": "sum(extracto_cost_usd_total)", "refId": "A" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 } },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area" }
-    },
-
-    {
-      "id": 10,
-      "type": "timeseries",
-      "title": "Field change rate (per minute)",
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 6 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "Each line is one (source, field). Spikes mean that field is currently churning.",
-      "targets": [
-        { "expr": "sum by(source_id, field) (rate(webharvest_field_changes_total[5m]) * 60)", "legendFormat": "src{{source_id}} · {{field}}", "refId": "A" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "/min" } }
-    },
-    {
-      "id": 11,
-      "type": "bargauge",
-      "title": "Top changing fields (last 1h)",
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 6 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "Which fields are responsible for the most drift recently. Useful for sizing where to focus inspection.",
-      "targets": [
-        { "expr": "topk(15, sum by(source_id, field) (increase(webharvest_field_changes_total[1h])))", "legendFormat": "src{{source_id}} · {{field}}", "refId": "A" }
-      ],
-      "options": { "orientation": "horizontal", "displayMode": "gradient" }
-    },
-
-    {
-      "id": 12,
-      "type": "table",
-      "title": "Most volatile entities (last 1h, from Postgres)",
-      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 15 },
-      "datasource": { "type": "postgres", "uid": "postgres" },
-      "description": "Per-entity update count from the entity_changes log. Click headers to sort. Operational read: which specific entities are flapping?",
-      "targets": [
-        {
-          "rawSql": "SELECT e.identity AS \"entity\", c.source_id AS \"source\", count(*) AS \"changes_1h\", count(DISTINCT c.field) AS \"fields_touched\", max(c.changed_at) AS \"last_change\" FROM entity_changes c JOIN entities e ON e.id = c.entity_id WHERE c.changed_at > now() - interval '1 hour' GROUP BY e.identity, c.source_id ORDER BY changes_1h DESC LIMIT 20",
-          "refId": "A",
-          "format": "table"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "custom": { "displayMode": "auto" } },
-        "overrides": [
-          { "matcher": { "id": "byName", "options": "changes_1h" }, "properties": [
-            { "id": "custom.displayMode", "value": "color-background" },
-            { "id": "thresholds", "value": { "mode": "absolute", "steps": [
-              {"color": "green", "value": null}, {"color": "yellow", "value": 3}, {"color": "orange", "value": 10}, {"color": "red", "value": 30}
-            ]}}
-          ]}
-        ]
-      }
-    },
-
-    {
-      "id": 14,
-      "type": "stat",
-      "title": "Fast-path hit rate (last 10m)",
-      "gridPos": { "h": 5, "w": 12, "x": 0, "y": 24 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "Per-source cached-anchor SLI. Healthy = 95%+ hit rate (most polls free, LLM only invoked when page changed). Drops = pay credits + alert fires.",
-      "targets": [
-        {
-          "expr": "sum by(source_id) (rate(webharvest_fast_path_total{outcome=\"hit\"}[10m])) / sum by(source_id) (rate(webharvest_fast_path_total[10m]))",
-          "legendFormat": "src {{source_id}}",
-          "refId": "A"
-        }
+        { "expr": "sum(rate(webharvest_fetch_errors_total[5m]) * 60) or vector(0)", "refId": "A" }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit", "min": 0, "max": 1, "decimals": 0,
+          "unit": "/min",
+          "decimals": 2,
           "thresholds": { "mode": "absolute", "steps": [
-            {"color": "red", "value": null},
-            {"color": "orange", "value": 0.5},
-            {"color": "yellow", "value": 0.7},
-            {"color": "green", "value": 0.95}
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 0.1 },
+            { "color": "red", "value": 1 }
           ]}
         }
       },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" }
     },
     {
-      "id": 15,
-      "type": "timeseries",
-      "title": "Fast-path latency p95 (BeautifulSoup, no LLM)",
-      "gridPos": { "h": 5, "w": 12, "x": 12, "y": 24 },
+      "id": 3,
+      "type": "stat",
+      "title": "Cron skips / hr",
+      "description": "APScheduler misfires or max-instance drops. High values mean the worker is overloaded or stuck.",
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by(le, source_id) (rate(webharvest_fast_path_duration_seconds_bucket[5m])))", "legendFormat": "src {{source_id}} p95", "refId": "A" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "s" } }
-    },
-
-    { "id": 200, "type": "row", "title": "Model bake-off (only fires when anchors miss)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 }, "collapsed": false, "panels": [] },
-
-    {
-      "id": 20,
-      "type": "timeseries",
-      "title": "Cost by model (USD/hr)",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "expr": "sum by(model) (rate(extracto_cost_usd_total[1h]) * 3600)", "legendFormat": "{{model}}", "refId": "A" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "currencyUSD" } }
-    },
-    {
-      "id": 21,
-      "type": "timeseries",
-      "title": "Extraction latency p95 by model",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "expr": "histogram_quantile(0.95, sum by(le, model) (rate(extracto_extract_duration_seconds_bucket[5m])))", "legendFormat": "{{model}} p95", "refId": "A" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "s" } }
-    },
-    {
-      "id": 22,
-      "type": "timeseries",
-      "title": "Set-level agreement (Jaccard, vs primary)",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 33 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "expr": "webharvest_agreement_jaccard", "legendFormat": "src{{source_id}}: {{challenger}}", "refId": "A" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } }
-    },
-    {
-      "id": 23,
-      "type": "timeseries",
-      "title": "Per-field agreement vs primary",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 33 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "expr": "webharvest_field_agreement", "legendFormat": "{{challenger}} · {{field}}", "refId": "A" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } }
-    },
-    {
-      "id": 24,
-      "type": "table",
-      "title": "Field agreement matrix (latest)",
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 41 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "expr": "webharvest_field_agreement", "format": "table", "instant": true, "refId": "A" }
+        { "expr": "sum(rate(webharvest_polls_skipped_total[15m]) * 3600) or vector(0)", "refId": "A" }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit", "min": 0, "max": 1,
-          "custom": { "displayMode": "color-background" },
+          "unit": "/h",
+          "decimals": 2,
           "thresholds": { "mode": "absolute", "steps": [
-            {"color": "red", "value": null},
-            {"color": "orange", "value": 0.7},
-            {"color": "yellow", "value": 0.9},
-            {"color": "green", "value": 0.97}
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 1 },
+            { "color": "red", "value": 5 }
           ]}
         }
       },
-      "transformations": [
-        { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true, "primary": true }, "renameByName": { "challenger": "Challenger", "field": "Field", "source_id": "Source", "Value": "Agreement" } } }
-      ]
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" }
     },
-
-    { "id": 300, "type": "row", "title": "Source health & runs", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 }, "collapsed": false, "panels": [] },
-
     {
-      "id": 30,
+      "id": 4,
       "type": "stat",
-      "title": "Fetches/min",
-      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 52 },
+      "title": "Active sources",
+      "description": "Sources with at least one poll recorded.",
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "expr": "sum by(outcome) (rate(webharvest_scraper_fetch_total[5m]) * 60)", "legendFormat": "{{outcome}}", "refId": "A" }
+        { "expr": "count(count by(source_id) (webharvest_poll_total)) or vector(0)", "refId": "A" }
       ],
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area" }
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" }
     },
     {
-      "id": 31,
+      "id": 5,
       "type": "timeseries",
-      "title": "Entities by change type (rate / 5m)",
-      "gridPos": { "h": 8, "w": 18, "x": 6, "y": 52 },
+      "title": "Fetch failures by class",
+      "description": "Operational failure taxonomy: timeout, DNS, HTTP 4xx/5xx, anti-bot, SSL, protocol.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "expr": "sum by(change) (rate(webharvest_scraper_run_entities_total[5m]) * 300)", "legendFormat": "{{change}}", "refId": "A" }
-      ]
+        { "expr": "sum by(error_class) (rate(webharvest_fetch_errors_total[5m]) * 60)", "legendFormat": "{{error_class}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "/min" } }
     },
-
     {
-      "id": 32,
+      "id": 6,
+      "type": "timeseries",
+      "title": "Poll duration p95 by source",
+      "description": "End-to-end runtime per source. Spikes usually mean an LLM anchoring run, slow network, or a large page.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by(le, source_id) (rate(webharvest_poll_duration_seconds_bucket[5m])))", "legendFormat": "src {{source_id}} p95", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Polling Strategy Comparison: Naive GET vs Conditional GET",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Conditional 304 hit rate",
+      "description": "How often conditional GET proves a source is unchanged and skips the extraction pipeline.",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(webharvest_fetch_requests_total{mode=\"conditional\",result=\"not_modified\"}[15m])) / (sum(rate(webharvest_fetch_requests_total{mode=\"conditional\"}[15m])) > 0)", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "yellow", "value": 0.25 },
+            { "color": "green", "value": 0.5 }
+          ]}
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Bytes saved",
+      "description": "Estimated response body bytes not downloaded because the upstream returned HTTP 304.",
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(webharvest_fetch_bytes_saved_total) or vector(0)", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "decimals": 1 } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Extractions skipped",
+      "description": "BS4/LLM/diff passes avoided because conditional HTTP returned 304.",
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(webharvest_extractions_skipped_total{reason=\"http_304\"}) or vector(0)", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Unsupported conditional sources",
+      "description": "Sources that returned full 2xx responses without reusable validators. These fall back to naive behavior.",
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "count(count by(source_id) (webharvest_fetch_requests_total{result=\"unsupported\"})) or vector(0)", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Fetch requests by strategy/result",
+      "description": "The direct comparison: naive full fetches vs conditional modified/not_modified/unsupported outcomes.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum by(mode, result) (rate(webharvest_fetch_requests_total[5m]) * 60)", "legendFormat": "{{mode}} · {{result}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "/min" } }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Downloaded bytes by strategy",
+      "description": "Naive downloads full bodies. Conditional downloads full bodies only when modified; 304 adds zero.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum by(mode) (rate(webharvest_fetch_bytes_total[5m]))", "legendFormat": "{{mode}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps" } }
+    },
+    {
+      "id": 300,
+      "type": "row",
+      "title": "Extraction Efficiency: LLM Anchor Once, DOM Fast Path Thereafter",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "DOM fast-path hit rate",
+      "description": "Cached-anchor BS4 success rate. This is the operating SLI for the unique LLM-bootstrap pattern.",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(webharvest_fast_path_total{outcome=\"hit\"}[15m])) / (sum(rate(webharvest_fast_path_total[15m])) > 0)", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "yellow", "value": 0.7 },
+            { "color": "green", "value": 0.95 }
+          ]}
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" }
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "LLM spend",
+      "description": "Actual dollars spent by anchoring calls. Steady-state cron should not move this.",
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(webharvest_scraper_cost_usd_total) or vector(0)", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" }
+    },
+    {
+      "id": 15,
+      "type": "stat",
+      "title": "Cost saved vs LLM every poll",
+      "description": "Estimated dollars avoided by using cached anchors instead of recurring LLM extraction.",
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(webharvest_cost_saved_usd_total) or vector(0)", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" }
+    },
+    {
+      "id": 16,
+      "type": "stat",
+      "title": "Oldest anchor age",
+      "description": "Longest-lived cached DOM recipe. Higher values prove the LLM anchoring artifact survives across cron polls.",
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 29 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "max(webharvest_anchor_age_seconds) or vector(0)", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "decimals": 1 } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" }
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Polls by path",
+      "description": "The full operational flow: conditional_skip, dom_fast_path, llm_anchor.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum by(path) (rate(webharvest_poll_total[5m]) * 60)", "legendFormat": "{{path}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "/min" } }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Anchor extraction count",
+      "description": "Entity count from the most recent DOM fast-path extraction per source. Drops indicate broken or degraded selectors.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "webharvest_anchor_extraction_count", "legendFormat": "src {{source_id}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 400,
+      "type": "row",
+      "title": "Entity Drift",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Field changes / min",
+      "description": "Only fields marked volatile in the schema increment this metric.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 43 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "topk(10, sum by(source_id, field) (rate(webharvest_field_changes_total[5m]) * 60))", "legendFormat": "src{{source_id}} · {{field}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "/min" } }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Entities by change type",
+      "description": "New, updated, and stale entity transitions written by the diff loop.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 43 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum by(change) (rate(webharvest_scraper_run_entities_total[5m]) * 60)", "legendFormat": "{{change}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "/min" } }
+    },
+    {
+      "id": 21,
       "type": "table",
-      "title": "Recent runs (Postgres)",
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 60 },
+      "title": "Most volatile entities (last 1h)",
+      "description": "Postgres-backed high-cardinality operational view: which exact entities changed most often.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 51 },
       "datasource": { "type": "postgres", "uid": "postgres" },
       "targets": [
         {
-          "rawSql": "SELECT started_at, source_id, backend, is_primary, confidence, entity_count, updated_count, stale_count, cost_usd, agreement, error FROM runs ORDER BY started_at DESC LIMIT 50",
-          "refId": "A",
-          "format": "table"
+          "rawSql": "SELECT e.identity AS \"entity\", c.source_id AS \"source\", count(*) AS \"changes_1h\", count(DISTINCT c.field) AS \"fields_touched\", max(c.changed_at) AS \"last_change\" FROM entity_changes c JOIN entities e ON e.id = c.entity_id WHERE c.changed_at > now() - interval '1 hour' GROUP BY e.identity, c.source_id ORDER BY changes_1h DESC LIMIT 25",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "table",
+      "title": "Recent runs",
+      "description": "Postgres event log for every operational path: conditional-304, fast-path, or the selected anchoring model.",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 51 },
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "targets": [
+        {
+          "rawSql": "SELECT r.started_at AS \"time\", r.source_id AS \"src\", r.backend AS \"path/model\", r.entity_count AS \"entities\", r.new_count AS \"new\", r.updated_count AS \"updated\", r.stale_count AS \"stale\", r.cost_usd AS \"cost\", left(coalesce(r.error, ''), 80) AS \"error\" FROM runs r ORDER BY r.started_at DESC LIMIT 50",
+          "format": "table",
+          "refId": "A"
         }
       ]
     }
   ],
   "refresh": "10s",
   "schemaVersion": 39,
-  "tags": ["webharvest"],
+  "style": "dark",
+  "tags": ["webharvest", "devops", "polling"],
   "templating": { "list": [] },
   "time": { "from": "now-1h", "to": "now" },
   "timepicker": {},
-  "timezone": "",
-  "title": "WebHarvest",
+  "timezone": "browser",
+  "title": "WebHarvest Operations",
   "uid": "webharvest",
-  "version": 3,
+  "version": 4,
   "weekStart": ""
 }

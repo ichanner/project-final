@@ -1,45 +1,132 @@
+
 groups:
   - name: webharvest
     interval: 15s
     rules:
 
-      # a primary run picked up an entity whose volatile field changed value
-      - alert: EntityFieldDrift
-        expr: increase(webharvest_scraper_run_entities_total{change="updated"}[2m]) > 0
-        labels:
-          severity: info
-          component: webharvest
-        annotations:
-          summary: "src {{ $labels.source_id }} — {{ $value | printf \"%.0f\" }} entity field-update(s)"
-          description: "A volatile field on a watched entity changed value. Open the React dashboard, click the source, expand the entity row to see what drifted."
 
-      # many entities marked stale at once. Means the page changed shape
-      - alert: StaleEntitySpike
-        expr: increase(webharvest_scraper_run_entities_total{change="stale"}[5m]) >= 5
+      - alert: AnchorBreakage
+        expr: |
+          (
+            webharvest_anchor_extraction_count
+            /
+            (avg_over_time(webharvest_anchor_extraction_count[1h] offset 1h) > 0)
+          ) < 0.5
+        for: 5m
         labels:
           severity: warning
           component: webharvest
+          claim: stability
         annotations:
-          summary: "src {{ $labels.source_id }} — {{ $value }} entities marked stale in 5m"
-          description: "Either the page is paginating and we lost a page, or its structure changed. Inspect the latest snapshot via the React 'snapshot' button on the source card."
+          summary: "src {{ $labels.source_id }} extracting {{ $value | humanizePercentage }} of normal entity count"
+          description: "Cached anchor recipe is producing fewer entities than the 1h moving average. Page DOM likely changed and the selector is partially broken. System cannot self-recover — operator must re-anchor."
+          diagnostic_query_promql: 'webharvest_anchor_extraction_count{source_id="{{ $labels.source_id }}"}'
+          diagnostic_query_sql: "SELECT started_at, entity_count, error FROM runs WHERE source_id={{ $labels.source_id }} ORDER BY started_at DESC LIMIT 10;"
+          remediation: "curl -X POST http://scraper:8080/sources/{{ $labels.source_id }}/re-anchor"
 
-      # hit rate per source
-      - alert: FastPathHitRateLow
-        expr: |
-          (
-            sum by(source_id) (rate(webharvest_fast_path_total{outcome="hit"}[10m]))
-            /
-            (sum by(source_id) (rate(webharvest_fast_path_total[10m])) > 0)
-          ) < 0.7
+      - alert: FieldExtractionDegraded
+        expr: webharvest_anchor_field_population_ratio < 0.5
         for: 10m
         labels:
           severity: warning
           component: webharvest
+          claim: stability
         annotations:
-          summary: "src {{ $labels.source_id }} fast-path hit rate at {{ $value | printf \"%.0f%%\" }}"
-          description: "Cached DOM anchors are failing too often. Page may have been redesigned. Click 're-anchor' on the source card to force a fresh LLM bake-off, or inspect the snapshot to see what BS4 saw."
+          summary: "src {{ $labels.source_id }} field '{{ $labels.field }}' populated in {{ $value | humanizePercentage }} of rows"
+          description: "Selector for this specific field has likely broken even though the root recipe still works. Other fields in the same source may still be fine — partial degradation."
+          diagnostic_query: "GET /sources/{{ $labels.source_id }}/snapshot — verify the field is still visible in the rendered page HTML"
+          remediation: "If the field is still on the page: POST /sources/{{ $labels.source_id }}/re-anchor. If the source removed the field entirely: PATCH /sources/{{ $labels.source_id }} to drop the field from the schema."
 
-      # $/hr rate exceeded a threshold with anchored fast-path the steady state is $0/hr
+      - alert: PhantomUpdatesElevated
+        expr: webharvest_anchor_phantom_update_ratio > 0.1
+        for: 15m
+        labels:
+          severity: info
+          component: webharvest
+          claim: stability
+        annotations:
+          summary: "src {{ $labels.source_id }} rejecting {{ $value | humanizePercentage }} of rows for anchor mismatch"
+          description: "BS4 is producing rows whose anchor field values disagree with the stored entity. Recipe is likely binding to the wrong DOM positions (multi-table page, page reordered, etc.). The diff correctly rejects them, but the symptom means the recipe is degrading."
+          remediation: "curl -X POST http://scraper:8080/sources/{{ $labels.source_id }}/re-anchor"
+
+
+      - alert: ConsecutiveFetchFailures
+        expr: webharvest_fetch_consecutive_failures >= 5
+        for: 1m
+        labels:
+          severity: warning
+          component: webharvest
+          claim: self_awareness
+        annotations:
+          summary: "src {{ $labels.source_id }} failed {{ $value | printf \"%.0f\" }} fetches in a row"
+          description: "Source may be down, blocking us, or rate-limiting. Each failure already incremented webharvest_fetch_errors_total with the specific error_class — check that breakdown to see the failure mode."
+          diagnostic_query_promql: 'sum by(error_class) (rate(webharvest_fetch_errors_total{source_id="{{ $labels.source_id }}"}[5m]))'
+          diagnostic_query_sql: "SELECT started_at, error FROM runs WHERE source_id={{ $labels.source_id }} AND error IS NOT NULL ORDER BY started_at DESC LIMIT 5;"
+          remediation: "Check source URL manually in a browser. Consider pausing: PATCH /sources/{{ $labels.source_id }} with refresh_cron=null while you investigate."
+
+      - alert: AntiBotDetected
+        expr: rate(webharvest_fetch_errors_total{error_class="anti_bot"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: webharvest
+          claim: self_awareness
+        annotations:
+          summary: "src {{ $labels.source_id }} receiving anti-bot interstitials"
+          description: "Response body is small AND contains challenge markers (cloudflare, captcha, 'verify you are human', etc.). Real data is not being received. Polling will fail until source unblocks us or we change tactics."
+          remediation: "Three options: (a) rotate User-Agent in services/scraper/src/fetcher.py and rebuild, (b) reduce poll cadence (PATCH refresh_cron to '*/15 * * * *' or slower), (c) accept this source cannot be polled and pause it."
+
+      - alert: PollSilent
+        expr: |
+          sum by(source_id) (rate(webharvest_poll_total[5m])) == 0
+          and on(source_id)
+          sum by(source_id) (webharvest_poll_total) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: webharvest
+          claim: self_awareness
+        annotations:
+          summary: "src {{ $labels.source_id }} has not polled in 5+ minutes"
+          description: "Poll rate dropped to 0 on a source that was previously active. Either the worker container died, apscheduler lost this job, refresh_cron was unset (intentionally), or the source was deleted."
+          diagnostic: "docker compose logs worker --tail 50"
+          remediation: "If worker is healthy and source still has refresh_cron set: docker compose restart worker (forces reconcile)."
+
+
+      - alert: ConditionalPollingUnsupported
+        expr: |
+          sum by(source_id) (
+            increase(webharvest_fetch_requests_total{result="unsupported"}[30m])
+          ) >= 3
+        for: 5m
+        labels:
+          severity: info
+          component: webharvest
+          claim: polling_efficiency
+        annotations:
+          summary: "src {{ $labels.source_id }} does not expose reusable HTTP validators"
+          description: "Conditional polling is enabled, but recent full responses did not include ETag or Last-Modified. The source is still healthy; it simply falls back to naive full-fetch behavior."
+          diagnostic_query_promql: 'sum by(mode, result) (increase(webharvest_fetch_requests_total{source_id="{{ $labels.source_id }}"}[30m]))'
+          remediation: "No immediate action. For high-frequency jobs, prefer sources that support ETag or Last-Modified, or lower this source's refresh_cron."
+
+      - alert: ConditionalPollingSavingsDropped
+        expr: |
+          (
+            sum by(source_id) (rate(webharvest_fetch_requests_total{mode="conditional",result="not_modified"}[30m]))
+            /
+            (sum by(source_id) (rate(webharvest_fetch_requests_total{mode="conditional"}[30m])) > 0)
+          ) < 0.1
+        for: 30m
+        labels:
+          severity: info
+          component: webharvest
+          claim: polling_efficiency
+        annotations:
+          summary: "src {{ $labels.source_id }} conditional hit rate below 10%"
+          description: "Conditional polling is working but rarely gets 304 responses. The page may change frequently, the server may rotate validators aggressively, or this source may not benefit from conditional polling."
+          diagnostic_query_promql: 'sum by(result) (increase(webharvest_fetch_requests_total{source_id="{{ $labels.source_id }}",mode="conditional"}[1h]))'
+          remediation: "Keep it enabled if harmless, or use the dashboard to justify a slower cron cadence."
+
       - alert: ExtractoCostSurge
         expr: |
           (
@@ -53,58 +140,32 @@ groups:
         labels:
           severity: warning
           component: webharvest
+          claim: economy
         annotations:
           summary: "{{ $labels.model }}{{ $labels.backend }} burning > $0.50/hr"
-          description: "Spending {{ $value | printf \"%.2f\" }} USD/hr. Either a re-anchor cycle is firing repeatedly (selectors broken — see FastPathHitRateLow), or a source was created without a primary anchor and every poll calls the LLM."
+          description: "Spending {{ $value | printf \"%.2f\" }} USD/hr. Either re-anchor cycles are firing repeatedly (anchors broken — see AnchorBreakage), or new sources are repeatedly entering the one-time LLM anchoring path."
+          diagnostic_query_promql: "sum by(source_id) (rate(webharvest_scraper_cost_usd_total[1h]) * 3600)"
+          diagnostic_query_sql: "SELECT id, label, primary_model FROM sources WHERE anchors IS NULL;"
+          remediation: "Find the offending source from the diagnostic above. Either let it complete its first anchoring (one-time cost) or pause it: PATCH /sources/{id} with refresh_cron=null."
 
-      # Fetch is failing on a source
-      - alert: SourceFetchFailing
-        expr: rate(webharvest_scraper_fetch_total{outcome="error"}[5m]) > 0
-        for: 5m
+
+      - alert: StaleEntitySpike
+        expr: increase(webharvest_scraper_run_entities_total{change="stale"}[5m]) >= 50
         labels:
           severity: warning
           component: webharvest
+          claim: stability
         annotations:
-          summary: "src {{ $labels.source_id }} fetch failures sustained for 5m"
-          description: "{{ $value | printf \"%.2f\" }} errors/sec on fetch. Either the page is down, the site started blocking us, or DNS/network is broken between our scraper and the target host."
+          summary: "src {{ $labels.source_id }} marked {{ $value | printf \"%.0f\" }} entities stale in 5m"
+          description: "Either the page is paginating differently and we lost a page, or its structure changed and entities aren't matching their previous identities."
+          remediation: "GET /sources/{{ $labels.source_id }}/snapshot to inspect what BS4 actually saw. If entities are genuinely gone from the source, no action (stale ≠ deleted). If they're there but matching wrong: POST /sources/{{ $labels.source_id }}/re-anchor."
 
-      # No fetch activity in 30 minutes
-      - alert: SourceStale
-        expr: |
-          (time() - max by(source_id) (
-            webharvest_scraper_fetch_created
-          )) > 1800
-          and on(source_id) (max by(source_id) (webharvest_scraper_fetch_total) > 0)
-        for: 1m
+      - alert: EntityFieldDrift
+        expr: increase(webharvest_field_changes_total[5m]) >= 100
         labels:
           severity: info
           component: webharvest
+          claim: drift_detection
         annotations:
-          summary: "src {{ $labels.source_id }} hasn't fetched in {{ $value | printf \"%.0f\" }}s"
-          description: "Source hasn't completed a fetch in 30+ minutes. Check whether the worker container is healthy, the source's refresh_cron is set, and the source still has anchors so the scheduled poll has work to do."
-
-      # Per-entity policy alert fired
-      - alert: EntityPolicyAlertFired
-        expr: increase(webharvest_entity_alerts_fired_total[2m]) > 0
-        labels:
-          severity: info
-          component: webharvest
-          policy: "true"
-        annotations:
-          summary: "src {{ $labels.source_id }} — policy rule {{ $labels.rule_id }} fired on field {{ $labels.field }}"
-          description: "A per-entity policy rule matched. {{ $value | printf \"%.0f\" }} fire(s) in 2m window. See the React 'Active alerts' panel or the entity_alerts Postgres table."
-
-      # Fresh bake-off disagreement
-      - alert: BakeOffFieldDisagreement
-        expr: |
-          (
-            webharvest_field_agreement < 0.85
-            and on(source_id, primary, challenger, field)
-            (changes(webharvest_field_agreement[10m]) > 0)
-          )
-        labels:
-          severity: info
-          component: webharvest
-        annotations:
-          summary: "{{ $labels.challenger }} disagreed with {{ $labels.primary }} on {{ $labels.field }} (src {{ $labels.source_id }})"
-          description: "Per-field agreement = {{ $value | printf \"%.2f\" }}. Inter-model disagreement on a recent bake-off run. Useful as a model-selection signal — see the Field agreement matrix in Grafana."
+          summary: "src {{ $labels.source_id }} field '{{ $labels.field }}' churning at {{ $value | printf \"%.0f\" }} changes / 5m"
+          description: "This is unusually heavy drift on this field — beyond normal background activity. Worth looking at."

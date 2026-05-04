@@ -1,13 +1,10 @@
-import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import {
-  createAlertRule, createSource, deleteAlertRule, deleteSource, entityHistory,
-  getAnchors, getSnapshot, listAlertRules, listAlerts, listEntities, listRuns,
-  listSources, patchAlertRule, patchSource, reAnchor, triggerRun,
+  createSource, deleteSource, entityHistory,
+  getAnchors, getSnapshot, listEntities,
+  listSources, patchSource, reAnchor, triggerRun,
 } from "./api";
 
-// -------------------- helpers --------------------
-
-const fmt = (d) => (d ? new Date(d).toLocaleString() : "—");
 const shortModel = (m) => (m && m.includes("/") ? m.split("/").slice(-1)[0] : (m || "—"));
 const isNumericLike = (v) =>
   typeof v === "number" || (typeof v === "string" && v && !Number.isNaN(parseFloat(v)));
@@ -32,8 +29,6 @@ function relTime(iso) {
   return `${Math.round(s / 86400)}d ago`;
 }
 
-// -------------------- primitives --------------------
-
 function Badge({ kind, children, title }) {
   const cls = kind === "err" ? "badge err" : kind === "primary" ? "badge cloud" : kind === "muted" ? "badge muted-badge" : "badge local";
   return <span className={cls} title={title}>{children}</span>;
@@ -46,8 +41,6 @@ function Pill({ on, children, onClick, title }) {
     </button>
   );
 }
-
-// -------------------- sparkline --------------------
 
 function Sparkline({ values, width = 140, height = 32 }) {
   if (!values || values.length < 2) return <span className="muted small">—</span>;
@@ -64,8 +57,6 @@ function Sparkline({ values, width = 140, height = 32 }) {
     </svg>
   );
 }
-
-// -------------------- cron editor --------------------
 
 const CRON_PRESETS = [
   { label: "1m",  cron: "* * * * *"    },
@@ -123,18 +114,22 @@ function CronEditor({ cron, onChange, compact }) {
   );
 }
 
-// -------------------- schema builder --------------------
-
 const FIELD_TYPES = ["string", "number", "boolean", "string[]"];
 
 function fieldsToSchema(fields) {
   const out = {};
-  for (const f of fields) {
+  fields.forEach((f, i) => {
     const name = (f.name || "").trim();
-    if (!name) continue;
-    out[name] = f.type === "string[]" ? { type: "array", items: { type: "string" } } : { type: f.type };
-  }
-  return Object.keys(out).length ? { fields: out } : { fields: { value: { type: "string" } } };
+    if (!name) return;
+    const base = f.type === "string[]"
+      ? { type: "array", items: { type: "string" } }
+      : { type: f.type };
+    const role = (i === 0 || !f.volatile) ? "anchor" : "volatile";
+    out[name] = { ...base, role };
+  });
+  return Object.keys(out).length
+    ? { fields: out }
+    : { fields: { value: { type: "string", role: "anchor" } } };
 }
 
 function SchemaBuilder({ fields, setFields }) {
@@ -176,40 +171,39 @@ function SchemaBuilder({ fields, setFields }) {
   );
 }
 
-// -------------------- new source form --------------------
-
 const ALL_MODELS = [
+  "google/gemini-2.0-flash-001",
   "anthropic/claude-sonnet-4",
   "openai/gpt-4o",
   "meta-llama/llama-3.3-70b-instruct",
-  "google/gemini-2.0-flash-001",
 ];
 
 const PRESETS = {
-  HN: {
-    url: "https://news.ycombinator.com/",
-    label: "HN front page",
-    anchor: "the list of front-page submissions with their points and authors",
-    fields: [
-      { name: "title",    type: "string", volatile: false },
-      { name: "user",     type: "string", volatile: false },
-      { name: "points",   type: "number", volatile: true },
-      { name: "comments", type: "number", volatile: true },
-    ],
-    cron: "*/2 * * * *",
-  },
   DeFi: {
     url: "https://www.blockchain.com/explorer/defi",
     label: "DeFi protocols",
-    anchor: "the list of DeFi protocols with their TVL, price, and 24h change",
+    anchor: "the table of DeFi protocols, one row per protocol, with the protocol name, current price in USD, 1-day percentage change, market capitalization, and 24-hour volume",
+    fields: [
+      { name: "name",         type: "string", volatile: false },
+      { name: "price",        type: "string", volatile: true  },
+      { name: "change_1d",    type: "string", volatile: true  },
+      { name: "market_cap",   type: "string", volatile: true  },
+      { name: "volume_24h",   type: "string", volatile: true  },
+    ],
+    cron: "* * * * *",
+  },
+  Steam: {
+    url: "https://steamcharts.com/top",
+    label: "Steam top games (live players)",
+    anchor: "the top games table, one row per Steam game, with the rank position, the game name, current concurrent player count, peak player count, and hours played",
     fields: [
       { name: "name",            type: "string", volatile: false },
-      { name: "token",           type: "string", volatile: false },
-      { name: "price_usd",       type: "number", volatile: true },
-      { name: "tvl_usd",         type: "number", volatile: true },
-      { name: "change_24h_pct",  type: "number", volatile: true },
+      { name: "rank",            type: "string", volatile: true  },
+      { name: "current_players", type: "string", volatile: true  },
+      { name: "peak_player",     type: "string", volatile: true  },
+      { name: "hours_played",    type: "string", volatile: true  },
     ],
-    cron: "*/2 * * * *",
+    cron: "* * * * *",
   },
   Lobsters: {
     url: "https://lobste.rs/",
@@ -231,27 +225,24 @@ function NewSourceForm({ onCreated }) {
   const [anchor, setAnchor] = useState("");
   const [fields, setFields] = useState([{ name: "title", type: "string", volatile: false }]);
   const [primary, setPrimary] = useState(ALL_MODELS[0]);
-  const [challengers, setChallengers] = useState(new Set(ALL_MODELS.slice(1)));
+  const [conditionalPolling, setConditionalPolling] = useState(true);
   const [cron, setCron] = useState("");
   const [showJson, setShowJson] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  const toggleChallenger = (m) => {
-    const n = new Set(challengers); n.has(m) ? n.delete(m) : n.add(m); setChallengers(n);
-  };
-
   const loadPreset = (key) => {
     const p = PRESETS[key];
     setUrl(p.url); setLabel(p.label); setAnchor(p.anchor); setFields(p.fields); setCron(p.cron);
+    setConditionalPolling(true);
   };
 
   const payload = useMemo(() => ({
     url, label: label || null, anchor: anchor || null,
     schema: fieldsToSchema(fields),
     primary_model: primary,
-    comparison_models: Array.from(challengers).filter((m) => m !== primary),
+    conditional_polling: conditionalPolling,
     refresh_cron: cron || null,
-  }), [url, label, anchor, fields, primary, challengers, cron]);
+  }), [url, label, anchor, fields, primary, conditionalPolling, cron]);
 
   const submit = async (alsoRun) => {
     if (!url || !primary) return;
@@ -260,6 +251,7 @@ function NewSourceForm({ onCreated }) {
       const { id } = await createSource(payload);
       if (alsoRun) await triggerRun(id);
       setUrl(""); setLabel(""); setAnchor(""); setCron("");
+      setConditionalPolling(true);
       setFields([{ name: "title", type: "string", volatile: false }]);
       onCreated();
     } finally { setBusy(false); }
@@ -292,19 +284,27 @@ function NewSourceForm({ onCreated }) {
 
       <div className="row" style={{ marginTop: 14, flexWrap: "wrap", gap: 16, alignItems: "flex-start" }}>
         <div>
-          <div className="muted small" style={{ marginBottom: 4 }}>Primary model</div>
+          <div className="muted small" style={{ marginBottom: 4 }}>Anchoring model</div>
           <select value={primary} onChange={(e) => setPrimary(e.target.value)}>
             {ALL_MODELS.map((m) => <option key={m} value={m}>{shortModel(m)}</option>)}
           </select>
+          <div className="muted small" style={{ marginTop: 4, fontSize: 11 }}>
+            called once per source on first-run / re-anchor
+          </div>
         </div>
         <div>
-          <div className="muted small" style={{ marginBottom: 4 }}>Challengers</div>
-          <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-            {ALL_MODELS.filter((m) => m !== primary).map((m) => (
-              <Pill key={m} on={challengers.has(m)} onClick={() => toggleChallenger(m)}>
-                {shortModel(m)}
-              </Pill>
-            ))}
+          <div className="muted small" style={{ marginBottom: 4 }}>HTTP polling strategy</div>
+          <label className="role-toggle" style={{ width: 190, justifyContent: "flex-start" }}>
+            <input
+              type="checkbox"
+              checked={conditionalPolling}
+              onChange={(e) => setConditionalPolling(e.target.checked)}
+              title="send If-None-Match / If-Modified-Since when the source supports validators"
+            />
+            <span className="small">{conditionalPolling ? "conditional GET" : "naive GET"}</span>
+          </label>
+          <div className="muted small" style={{ marginTop: 4, fontSize: 11 }}>
+            compares 304 skips vs full downloads
           </div>
         </div>
         <div className="grow">
@@ -330,9 +330,46 @@ function NewSourceForm({ onCreated }) {
   );
 }
 
-// -------------------- sources panel --------------------
+function RunFeedback({ result }) {
+  if (!result) return null;
+  const ok = !result.error && (result.primary?.run_id || result.run_id);
+  if (result.error || result.primary?.error) {
+    const msg = result.error || result.primary?.error;
+    return (
+      <div className="run-feedback err">
+        <Badge kind="err">run failed</Badge>
+        <span className="small mono">{String(msg).slice(0, 200)}</span>
+      </div>
+    );
+  }
+  const p = result.primary || {};
+  const path = result.fast_path?.skipped ? "http-304" : (result.fast_path?.hit ? "fast-path" : (result.primary_model || "?"));
+  const dur = result.fast_path?.duration_ms;
+  return (
+    <div className={`run-feedback ${ok ? "ok" : "warn"}`}>
+      <Badge kind={path === "fast-path" ? "local" : "primary"}>{path}</Badge>
+      <span className="small">
+        <strong>{p.entity_count ?? 0}</strong> entities
+        <span className="muted"> · </span>
+        <strong>+{p.new ?? 0}</strong>/<strong>Δ{p.updated ?? 0}</strong>/<strong>×{p.stale ?? 0}</strong>
+        {p.cost_usd > 0 && <>
+          <span className="muted"> · </span>
+          <strong>${Number(p.cost_usd).toFixed(4)}</strong>
+        </>}
+        {dur != null && <>
+          <span className="muted"> · </span>
+          <strong>{dur}ms</strong>
+        </>}
+        {p.bytes_saved > 0 && <>
+          <span className="muted"> · </span>
+          <strong>{(p.bytes_saved / 1024).toFixed(1)} KB saved</strong>
+        </>}
+      </span>
+    </div>
+  );
+}
 
-function Sources({ sources, onRun, onSelect, busyId, selectedId, onCronChange, onDelete, onReAnchor, onInspectSnapshot }) {
+function Sources({ sources, onRun, onSelect, busyId, selectedId, onCronChange, onDelete, onReAnchor, onInspectSnapshot, onShowRecipe, lastRunResult }) {
   useTick(5000);
   return (
     <div className="panel">
@@ -361,23 +398,26 @@ function Sources({ sources, onRun, onSelect, busyId, selectedId, onCronChange, o
                 <button className="secondary" onClick={() => onSelect(s.id)}>
                   {selectedId === s.id ? "Hide" : "Inspect"}
                 </button>
+                <button className="ghost" onClick={() => onShowRecipe(s.id)} disabled={!s.has_anchors} title={s.has_anchors ? "view the cached CSS-selector recipe BS4 is applying" : "not yet anchored"}>recipe</button>
                 <button className="ghost" onClick={() => onReAnchor(s.id)} title="invalidate cached anchors — next run uses LLM">re-anchor</button>
                 <button className="ghost" onClick={() => onInspectSnapshot(s.id)} title="see what the LLM/BS4 actually received">snapshot</button>
                 <button className="ghost danger" onClick={() => onDelete(s.id)} title="delete">×</button>
               </div>
             </div>
 
+            <RunFeedback result={lastRunResult?.[s.id]} />
+
             <div className="src-meta">
               <div>
-                <span className="muted small">primary</span>
+                <span className="muted small">model</span>
                 <Badge kind="primary" title={s.primary_model}>{shortModel(s.primary_model)}</Badge>
               </div>
-              {(s.comparison_models || []).length > 0 && (
-                <div>
-                  <span className="muted small">vs</span>
-                  <span className="small">{(s.comparison_models || []).map(shortModel).join(", ")}</span>
-                </div>
-              )}
+              <div>
+                <span className="muted small">http</span>
+                <Badge kind={s.conditional_polling ? "local" : "muted"} title={s.etag || s.last_modified || "no validator stored yet"}>
+                  {s.conditional_polling ? (s.etag || s.last_modified ? "conditional" : "conditional?") : "naive"}
+                </Badge>
+              </div>
               <div>
                 <span className="muted small">fields</span>
                 <span className="small mono">{(s.schema_field_names || []).join(", ") || "—"}</span>
@@ -402,6 +442,29 @@ function Sources({ sources, onRun, onSelect, busyId, selectedId, onCronChange, o
   );
 }
 
+function RecipeModal({ recipe, onClose }) {
+  if (!recipe) return null;
+  const { source_id, anchors, last_anchored_at } = recipe;
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <h2 style={{ margin: 0 }}>Anchor recipe — source #{source_id}</h2>
+          <button className="ghost" onClick={onClose}>×</button>
+        </div>
+        <div className="muted small" style={{ marginTop: 6 }}>
+          {anchors
+            ? <>cached {relTime(last_anchored_at)} · BS4 applies this on every poll, no LLM call</>
+            : <>no cached anchors — first run will call the LLM to generate one</>}
+        </div>
+        <pre className="json-preview" style={{ maxHeight: 500, marginTop: 12 }}>
+          {anchors ? JSON.stringify(anchors, null, 2) : "(none)"}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
 function SnapshotModal({ snapshot, onClose }) {
   if (!snapshot) return null;
   return (
@@ -421,8 +484,6 @@ function SnapshotModal({ snapshot, onClose }) {
     </div>
   );
 }
-
-// -------------------- entity history (inline) --------------------
 
 function ChangeLine({ change }) {
   const oldS = change.old_value == null ? "∅" : JSON.stringify(change.old_value);
@@ -451,11 +512,10 @@ function FieldHistory({ history, field }) {
   const series = useMemo(() => {
     const events = history.changes.filter((c) => c.field === field);
     const init = numify(history.current?.[field]);
-    const reversed = events.slice().reverse();  // oldest -> newest
+    const reversed = events.slice().reverse();
     const values = [];
     let running = init;
     if (reversed.length === 0 || Number.isNaN(numify(reversed[0].old_value))) {
-      // no numeric history; bail
     } else {
       values.push(numify(reversed[0].old_value));
       for (const c of reversed) values.push(numify(c.new_value));
@@ -481,7 +541,6 @@ function ExpandedEntity({ sourceId, entityId, currentData, onClose }) {
   }, [sourceId, entityId]);
   useEffect(() => { refresh(); }, [refresh]);
 
-  // Numeric fields suitable for sparklines
   const numericFields = useMemo(() => {
     if (!currentData) return [];
     return Object.entries(currentData).filter(([, v]) => isNumericLike(v)).map(([k]) => k);
@@ -519,141 +578,7 @@ function ExpandedEntity({ sourceId, entityId, currentData, onClose }) {
   );
 }
 
-// -------------------- entities table --------------------
-
-// -------------------- policy alerts (Option A) --------------------
-
-const OPERATORS = ["<", ">", "<=", ">=", "==", "!=", "contains", "!contains"];
-
-function PolicyPanel({ sourceId, schemaFieldNames }) {
-  const [rules, setRules] = useState([]);
-  const [alerts, setAlerts] = useState([]);
-  const [busy, setBusy] = useState(false);
-  const [draft, setDraft] = useState({
-    name: "", entity_match: "*", field: schemaFieldNames[0] || "",
-    operator: "<", threshold: ""
-  });
-  useTick(5000);
-
-  const refresh = useCallback(async () => {
-    try {
-      const [r, a] = await Promise.all([listAlertRules(sourceId), listAlerts(sourceId)]);
-      setRules(r); setAlerts(a);
-    } catch (e) { /* ignore */ }
-  }, [sourceId]);
-
-  useEffect(() => {
-    refresh();
-    const t = setInterval(refresh, 5000);
-    return () => clearInterval(t);
-  }, [refresh]);
-
-  useEffect(() => {
-    setDraft((d) => ({ ...d, field: schemaFieldNames[0] || d.field }));
-  }, [schemaFieldNames]);
-
-  const submit = async (e) => {
-    e.preventDefault();
-    if (!draft.name || !draft.field || draft.threshold === "") return;
-    setBusy(true);
-    try {
-      await createAlertRule(sourceId, {
-        ...draft,
-        entity_match: draft.entity_match === "*" ? null : draft.entity_match,
-        enabled: true,
-      });
-      setDraft({ name: "", entity_match: "*", field: schemaFieldNames[0] || "", operator: "<", threshold: "" });
-      refresh();
-    } finally { setBusy(false); }
-  };
-
-  const toggle = async (rule) => {
-    await patchAlertRule(rule.id, { enabled: !rule.enabled });
-    refresh();
-  };
-
-  const remove = async (rule) => {
-    if (!confirm(`Delete rule "${rule.name}"?`)) return;
-    await deleteAlertRule(rule.id);
-    refresh();
-  };
-
-  return (
-    <div className="panel">
-      <div className="row" style={{ justifyContent: "space-between" }}>
-        <h2 style={{ margin: 0 }}>Policy alerts — source {sourceId}</h2>
-        <span className="muted small">declare a rule, system fires it on every poll for free</span>
-      </div>
-
-      <form className="policy-form" onSubmit={submit} style={{ marginTop: 12 }}>
-        <input placeholder='rule name (e.g. "HYPE under $30")' value={draft.name}
-          onChange={(e) => setDraft({ ...draft, name: e.target.value })} className="grow" />
-        <input placeholder="entity (or * for all)" value={draft.entity_match}
-          onChange={(e) => setDraft({ ...draft, entity_match: e.target.value })} style={{ width: 180 }} />
-        <select value={draft.field} onChange={(e) => setDraft({ ...draft, field: e.target.value })}>
-          {schemaFieldNames.map((f) => <option key={f} value={f}>{f}</option>)}
-        </select>
-        <select value={draft.operator} onChange={(e) => setDraft({ ...draft, operator: e.target.value })}>
-          {OPERATORS.map((op) => <option key={op} value={op}>{op}</option>)}
-        </select>
-        <input placeholder="threshold" value={draft.threshold}
-          onChange={(e) => setDraft({ ...draft, threshold: e.target.value })} style={{ width: 140 }} />
-        <button disabled={busy || !draft.name || draft.threshold === ""}>add rule</button>
-      </form>
-
-      {rules.length > 0 && (
-        <div style={{ marginTop: 12 }}>
-          <div className="muted small" style={{ marginBottom: 6 }}>{rules.filter(r => r.enabled).length} active / {rules.length} total</div>
-          <table className="rules-table">
-            <thead><tr>
-              <th>name</th><th>entity</th><th>field</th><th>op</th><th>threshold</th><th>state</th><th></th>
-            </tr></thead>
-            <tbody>
-              {rules.map((r) => (
-                <tr key={r.id} className={r.enabled ? "" : "disabled"}>
-                  <td><strong>{r.name}</strong></td>
-                  <td className="muted">{r.entity_match || <span style={{opacity: 0.5}}>* (all)</span>}</td>
-                  <td className="mono small">{r.field}</td>
-                  <td className="mono small">{r.operator}</td>
-                  <td className="mono small">{r.threshold}</td>
-                  <td>
-                    <button type="button" className="ghost small-btn" onClick={() => toggle(r)}>
-                      {r.enabled ? "● on" : "○ off"}
-                    </button>
-                  </td>
-                  <td><button type="button" className="ghost danger" onClick={() => remove(r)}>×</button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      <div style={{ marginTop: 16 }}>
-        <div className="muted small" style={{ marginBottom: 6 }}>recent fires ({alerts.length})</div>
-        {alerts.length === 0 ? (
-          <p className="muted small" style={{ margin: 0 }}>no fires yet — rules evaluate on every poll, fires show up here in real time.</p>
-        ) : (
-          <div className="alert-feed">
-            {alerts.slice(0, 10).map((a) => (
-              <div key={a.id} className="alert-line">
-                <span className="muted small">{relTime(a.fired_at)}</span>
-                <Badge kind="primary">{a.rule_name}</Badge>
-                <span className="mono small">{a.entity_identity}</span>
-                <span className="muted">·</span>
-                <span className="mono small">{a.field}={JSON.stringify(a.field_value)}</span>
-                <span className="muted">{a.operator}</span>
-                <span className="mono small">{a.threshold}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function Entities({ sourceId, entities, onRefresh }) {
+function Entities({ sourceId, entities }) {
   const [openId, setOpenId] = useState(null);
   if (!sourceId) return null;
   const fields = Array.from(new Set(entities.flatMap((e) => Object.keys(e.data || {}))));
@@ -712,78 +637,20 @@ function Entities({ sourceId, entities, onRefresh }) {
   );
 }
 
-// -------------------- runs --------------------
-
-function Runs({ runs }) {
-  const grouped = useMemo(() => {
-    const out = []; let last = null;
-    for (const r of runs) {
-      const key = r.snapshot_id ?? `solo-${r.id}`;
-      if (!last || last.key !== key) { last = { key, rows: [] }; out.push(last); }
-      last.rows.push(r);
-    }
-    return out;
-  }, [runs]);
-  useTick(5000);
-
-  return (
-    <div className="panel">
-      <div className="row" style={{ justifyContent: "space-between" }}>
-        <h2 style={{ margin: 0 }}>Recent runs</h2>
-        <span className="muted small">grouped by snapshot</span>
-      </div>
-      <table className="runs-table" style={{ marginTop: 10 }}>
-        <thead>
-          <tr>
-            <th>Snap</th><th>Run</th><th>Src</th><th>When</th>
-            <th>Model</th><th>Role</th>
-            <th>Conf</th><th>Ents</th><th>Agree</th><th>+/Δ/×</th><th>Cost</th>
-          </tr>
-        </thead>
-        <tbody>
-          {grouped.map((g) => g.rows.map((r, i) => (
-            <tr key={r.id} className={i === 0 ? "snap-first" : ""}>
-              {i === 0 ? <td rowSpan={g.rows.length} className="muted small">{r.snapshot_id ?? "—"}</td> : null}
-              <td>#{r.id}</td>
-              <td>{r.source_id}</td>
-              <td className="muted small">{relTime(r.started_at)}</td>
-              <td className="mono small" title={r.backend}>{shortModel(r.backend)}</td>
-              <td>
-                {r.error ? <Badge kind="err">error</Badge>
-                  : r.is_primary ? <Badge kind="primary">primary</Badge>
-                  : <Badge>chal.</Badge>}
-              </td>
-              <td>{r.confidence != null ? Number(r.confidence).toFixed(2) : "—"}</td>
-              <td>{r.entity_count ?? 0}</td>
-              <td>{r.agreement != null ? <span className={agreeColor(r.agreement)}>{Number(r.agreement).toFixed(2)}</span> : <span className="muted">—</span>}</td>
-              <td className="muted small">
-                {r.is_primary ? `${r.new_count ?? 0}/${r.updated_count ?? 0}/${r.stale_count ?? 0}` : "—"}
-              </td>
-              <td className="num small">${Number(r.cost_usd ?? 0).toFixed(4)}</td>
-            </tr>
-          )))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-const agreeColor = (a) => a >= 0.97 ? "agree-hi" : a >= 0.85 ? "agree-mid" : "agree-lo";
-
-// -------------------- app --------------------
-
 export default function App() {
   const [sources, setSources] = useState([]);
-  const [runs, setRuns] = useState([]);
   const [selected, setSelected] = useState(null);
   const [entities, setEntities] = useState([]);
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState(null);
+  const [snapshot, setSnapshot] = useState(null);
+  const [recipe, setRecipe] = useState(null);
+  const [lastRunResult, setLastRunResult] = useState({});
 
   const refresh = useCallback(async () => {
     try {
-      const [s, r] = await Promise.all([listSources(), listRuns()]);
-      setSources(s); setRuns(r); setError(null);
+      const s = await listSources();
+      setSources(s); setError(null);
     } catch (e) { setError(e.message); }
   }, []);
 
@@ -799,13 +666,20 @@ export default function App() {
     load();
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
-  }, [selected, runs]);
+  }, [selected]);
 
   const handleRun = async (id) => {
     setBusyId(id);
-    try { await triggerRun(id); await refresh(); }
-    catch (e) { setError(e.message); }
-    finally { setBusyId(null); }
+    try {
+      const result = await triggerRun(id);
+      setLastRunResult((prev) => ({ ...prev, [id]: result }));
+      await refresh();
+    } catch (e) {
+      setLastRunResult((prev) => ({ ...prev, [id]: { error: e.message } }));
+      setError(e.message);
+    } finally {
+      setBusyId(null);
+    }
   };
 
   const handleCronChange = async (id, cron) => {
@@ -815,11 +689,18 @@ export default function App() {
 
   const handleDelete = async (id) => {
     if (!confirm("Delete this source and all its data?")) return;
-    try { await deleteSource(id); if (selected === id) setSelected(null); await refresh(); }
-    catch (e) { setError(e.message); }
+    const snapshot = sources;
+    setSources((prev) => prev.filter((s) => s.id !== id));
+    setLastRunResult((prev) => { const n = { ...prev }; delete n[id]; return n; });
+    if (selected === id) setSelected(null);
+    try {
+      await deleteSource(id);
+      await refresh();
+    } catch (e) {
+      setSources(snapshot);
+      setError(`delete failed: ${e.message}`);
+    }
   };
-
-  const [snapshot, setSnapshot] = useState(null);
 
   const handleReAnchor = async (id) => {
     if (!confirm("Invalidate cached anchors? Next run will use the LLM (incurs cost).")) return;
@@ -832,16 +713,22 @@ export default function App() {
     catch (e) { setError(e.message); }
   };
 
+  const handleShowRecipe = async (id) => {
+    try { setRecipe(await getAnchors(id)); }
+    catch (e) { setError(e.message); }
+  };
+
   return (
     <div className="app">
       <header>
         <div>
           <h1>WebHarvest</h1>
-          <span className="muted small">multi-model bake-off • per-source polling • field-level drift</span>
+          <span className="muted small">conditional HTTP polling · LLM-bootstrapped DOM anchors · field-level drift</span>
         </div>
         <nav>
-          <a href="/grafana/" target="_blank" rel="noreferrer">Grafana</a>
-          <a href="/prometheus/" target="_blank" rel="noreferrer">Prometheus</a>
+          <a href={`http://${window.location.hostname}:3001/d/webharvest`} target="_blank" rel="noreferrer">Grafana</a>
+          <a href={`http://${window.location.hostname}:9090/`} target="_blank" rel="noreferrer">Prometheus</a>
+          <a href={`http://${window.location.hostname}:9090/alerts`} target="_blank" rel="noreferrer">Alerts</a>
         </nav>
       </header>
       {error && <div className="panel err-panel"><Badge kind="err">error</Badge> <span className="small">{error}</span></div>}
@@ -851,16 +738,12 @@ export default function App() {
         busyId={busyId} selectedId={selected}
         onCronChange={handleCronChange} onDelete={handleDelete}
         onReAnchor={handleReAnchor} onInspectSnapshot={handleInspectSnapshot}
+        onShowRecipe={handleShowRecipe}
+        lastRunResult={lastRunResult}
       />
       <SnapshotModal snapshot={snapshot} onClose={() => setSnapshot(null)} />
-      {selected && (
-        <PolicyPanel
-          sourceId={selected}
-          schemaFieldNames={(sources.find((s) => s.id === selected)?.schema_field_names) || []}
-        />
-      )}
+      <RecipeModal recipe={recipe} onClose={() => setRecipe(null)} />
       {selected && <Entities sourceId={selected} entities={entities} />}
-      <Runs runs={runs} />
     </div>
   );
 }

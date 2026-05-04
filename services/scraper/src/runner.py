@@ -1,58 +1,65 @@
-"""Cached-anchor first, LLM bake-off as fallback.
+"""Conditional-fetch first, cached-anchor second, LLM anchoring only on demand.
 
 Architecture (the cost story):
 
   Each Run on a source:
-    1. Fetch HTML, snapshot it.
+    1. Fetch HTML. If the source has validators, send If-None-Match /
+       If-Modified-Since. A 304 inserts a run row and skips extraction.
     2. If source.anchors is set:
          - Apply via BeautifulSoup (~50ms, $0).
          - Verify result quality against the LLM's verification probe.
          - If valid: insert a single fast-path run row, diff, persist. DONE.
-       If anchors are missing or fail verification:
-         - Run the LLM bake-off (primary + challengers, all in parallel).
-         - Each model returns its OWN anchor recipe (NOT entities).
-         - Apply each recipe via BS4. The "agreement" metric becomes "do
-           the models' recipes produce the same entity set?"
-         - If primary's recipe verifies, save it to source.anchors.
-         - Insert one run row per model. Diff primary's entities, persist.
+       If anchors are missing:
+         - Call the selected LLM once to create an anchor recipe + bootstrap
+           entity sample. Cache the recipe; future cron polls use BS4 only.
 
-The bake-off survives — but it only runs when anchors are missing or have
-broken. Steady state polls cost zero LLM tokens.
+Steady state polls cost zero LLM tokens. Conditional 304 polls skip even BS4.
+
+This module emits the THESIS-CRITICAL metrics: anchor_age, anchor_extraction_count,
+anchor_field_population_ratio, anchor_phantom_update_ratio, cost_saved_usd_total.
+Fetch-side metrics live entirely in fetcher.py to keep the metric story per-file.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 from psycopg.types.json import Jsonb
 
-from .db import conn
+from .db import conn, ensure_runtime_schema
 from .diff import identity_for
 from .dom_extractor import apply_anchors, verify_anchors
 from .fetcher import fetch
-from .policy import evaluate as evaluate_policy, load_rules as load_policy_rules
 from .metrics import (
-    agreement_jaccard,
-    escalations_total,
+    anchor_age_seconds,
+    anchor_extraction_count,
+    anchor_field_population_ratio,
+    anchor_phantom_update_ratio,
+    anchor_re_anchor_total,
+    cost_saved_usd_total,
+    extractions_skipped_total,
     fast_path_duration,
     fast_path_total,
+    fetch_bytes_saved_total,
     fetch_duration,
     fetch_total,
-    field_agreement,
     field_changes_total,
-    run_confidence,
+    poll_duration,
+    poll_total,
     run_cost_usd,
     run_entities,
 )
+from .pricing import estimate_extraction_cost
 
 log = logging.getLogger("scraper.runner")
 
 EXTRACTO_URL = os.environ.get("EXTRACTO_URL", "http://extracto:8081")
+_schema_checked = False
 
 
 async def _call_model(
@@ -87,7 +94,7 @@ async def _call_model(
             "duration_s": time.monotonic() - t0,
             "error": None,
         }
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return {
             "model": model,
             "anchors": None,
@@ -97,13 +104,6 @@ async def _call_model(
             "duration_s": time.monotonic() - t0,
             "error": str(e),
         }
-
-
-def _jaccard(a: set[str], b: set[str]) -> float:
-    if not a and not b:
-        return 1.0
-    union = len(a | b)
-    return (len(a & b) / union) if union else 0.0
 
 
 def _schema_field_names(schema: dict) -> list[str]:
@@ -172,31 +172,21 @@ def _diff_and_persist(
         old_id, old_data = existing
         old_data = old_data or {}
 
-        # Anchor cross-check: if the stored entity has anchor field values and
-        # this incoming row's anchor fields don't agree, the row was likely
-        # bound to the wrong DOM position (e.g. extractor pulled a cell from
-        # a different table). Skip — better to keep stale-but-correct than
-        # update with wrong values.
         if secondary_anchors:
             mismatched = []
             for af in secondary_anchors:
                 old_a = old_data.get(af)
                 new_a = ent.get(af)
-                # Both populated AND different -> reject. Empty values pass
-                # through (extractor sometimes drops a cell, that's noise).
                 if old_a and new_a and str(old_a).strip() and str(new_a).strip() and old_a != new_a:
                     mismatched.append((af, old_a, new_a))
             if mismatched:
                 rejected_count += 1
-                # Don't mark stale — we still saw this entity, just couldn't
-                # trust THIS row's data. Touch last_seen so it doesn't go stale.
                 cur.execute(
                     "UPDATE entities SET last_seen = now(), last_run_id = %s, stale = FALSE WHERE id = %s",
                     (primary_run_id, old_id),
                 )
                 continue
 
-        # Did any VOLATILE field change?
         volatile_diff = False
         changed_volatile_fields: list[tuple[str, Any, Any]] = []
         for field_name in drift_fields:
@@ -206,8 +196,6 @@ def _diff_and_persist(
                 volatile_diff = True
                 changed_volatile_fields.append((field_name, old_v, new_v))
 
-        # Always update the stored row (so anchor-field flicker repairs itself
-        # silently), but only count + log when volatile fields drifted.
         cur.execute(
             "UPDATE entities SET data = %s, confidence = %s, "
             "last_seen = now(), last_run_id = %s, stale = FALSE WHERE id = %s",
@@ -237,39 +225,46 @@ def _diff_and_persist(
     stale_count = cur.rowcount or 0
     if stale_count > 0:
         run_entities.labels(source_id=sid_label, change="stale").inc(stale_count)
+
+    total_rows = len(entities) or 1
+    anchor_phantom_update_ratio.labels(source_id=sid_label).set(rejected_count / total_rows)
+
     if rejected_count:
         log.info(
             "src=%s rejected %s rows for anchor-field mismatch (extractor bound to wrong DOM row)",
             source_id, rejected_count,
         )
 
-    # Policy evaluation — per-entity rules fire here, on every poll, free.
-    rules = load_policy_rules(cur, source_id)
-    if rules:
-        # Build (entity_db_id, identity, data) tuples from this run's set.
-        eval_input: list[tuple[int, str, dict]] = []
-        for ent in entities:
-            ident = identity_for(ent, identity_key, schema_fields)
-            cur.execute(
-                "SELECT id FROM entities WHERE source_id = %s AND identity = %s",
-                (source_id, ident),
-            )
-            row = cur.fetchone()
-            if row:
-                eval_input.append((row[0], ident, ent))
-        evaluate_policy(cur, source_id, sid_label, primary_run_id, eval_input, rules)
-
     return new_count, updated_count, stale_count
 
 
-async def _fetch_and_snapshot(source_id: int, url: str, sid_label: str) -> tuple[int, str, int] | None:
-    """Returns (status, html, snapshot_id) or None on fetch error."""
+async def _fetch_and_snapshot(
+    source_id: int,
+    url: str,
+    sid_label: str,
+    *,
+    conditional_polling: bool,
+    etag: str | None,
+    last_modified: str | None,
+    last_content_bytes: int | None,
+) -> dict[str, Any]:
+    """Returns fetch/snapshot metadata or an error-marker dict on failure.
+
+    Fetch metric emission lives entirely in fetcher.py — the per-status,
+    error-class, response-size, redirect-count, and consecutive-failure
+    counters all fire there. We just consume the (status, html) here and
+    log the failure to runs.error if something blew up.
+    """
     t0 = time.monotonic()
     try:
-        status, html = await fetch(url)
-        fetch_total.labels(source_id=sid_label, outcome="ok").inc()
-    except Exception as e:  # noqa: BLE001
-        fetch_total.labels(source_id=sid_label, outcome="error").inc()
+        result = await fetch(
+            url,
+            source_id,
+            conditional=conditional_polling,
+            etag=etag,
+            last_modified=last_modified,
+        )
+    except Exception as e:
         with conn() as c, c.cursor() as cur:
             cur.execute(
                 "INSERT INTO runs (source_id, started_at, finished_at, error, is_primary) "
@@ -277,274 +272,324 @@ async def _fetch_and_snapshot(source_id: int, url: str, sid_label: str) -> tuple
                 (source_id, str(e)),
             )
             run_id = cur.fetchone()[0]
-        log.exception("fetch failed src=%s", source_id)
-        return {"_error_run_id": run_id, "_error": str(e)}  # type: ignore[return-value]
+        log.warning("fetch failed src=%s: %s", source_id, e)
+        return {"_error_run_id": run_id, "_error": str(e)}
     finally:
         fetch_duration.labels(source_id=sid_label).observe(time.monotonic() - t0)
 
+    if result.status_code == 304:
+        saved = max(int(last_content_bytes or 0), 0)
+        if saved:
+            fetch_bytes_saved_total.labels(source_id=sid_label).inc(saved)
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                "UPDATE sources SET etag = COALESCE(%s, etag), "
+                "last_modified = COALESCE(%s, last_modified), updated_at = now() "
+                "WHERE id = %s",
+                (result.etag, result.last_modified, source_id),
+            )
+        return {
+            "status": result.status_code,
+            "html": None,
+            "snapshot_id": None,
+            "not_modified": True,
+            "bytes_saved": saved,
+            "fetch_mode": result.mode,
+        }
+
+    html = result.html or ""
     with conn() as c, c.cursor() as cur:
         cur.execute(
             "INSERT INTO snapshots (source_id, status_code, html, bytes) "
             "VALUES (%s, %s, %s, %s) RETURNING id",
-            (source_id, status, html, len(html)),
+            (source_id, result.status_code, html, len(html)),
         )
         snapshot_id = cur.fetchone()[0]
+        cur.execute(
+            "UPDATE sources SET etag = %s, last_modified = %s, "
+            "last_content_bytes = %s, updated_at = now() WHERE id = %s",
+            (result.etag, result.last_modified, result.bytes_downloaded, source_id),
+        )
 
-    return status, html, snapshot_id
+    return {
+        "status": result.status_code,
+        "html": html,
+        "snapshot_id": snapshot_id,
+        "not_modified": False,
+        "bytes_saved": 0,
+        "fetch_mode": result.mode,
+        "fetch_result": result.result,
+    }
 
 
 async def run_source(source_id: int) -> dict[str, Any]:
-    with conn() as c, c.cursor() as cur:
-        cur.execute(
-            "SELECT url, schema, anchor, identity_key, primary_model, comparison_models, anchors "
-            "FROM sources WHERE id = %s",
-            (source_id,),
-        )
-        row = cur.fetchone()
-        if not row:
-            raise ValueError(f"source {source_id} not found")
-        url, schema, anchor, identity_key, primary_model, comparison_models, cached_anchors = row
+    """Execute a poll for one source. Wraps the entire pipeline in poll_duration
+    so even error-paths contribute timing data."""
+    global _schema_checked
+    if not _schema_checked:
+        ensure_runtime_schema()
+        _schema_checked = True
 
+    poll_t0 = time.monotonic()
     sid_label = str(source_id)
-    schema = schema or {}
-    schema_fields = _schema_field_names(schema)
-    anchor_fields, volatile_fields = _split_field_roles(schema)
-    identity_key = list(identity_key or [])
-    comparison_models = list(comparison_models or [])
-    identity_field = identity_key[0] if identity_key else (anchor_fields[0] if anchor_fields else (schema_fields[0] if schema_fields else None))
 
-    # Pre-touch label combos so the time-series exist with value 0. Without
-    # this, an alert like `increase(...{change="stale"}[5m])` evaluates
-    # against zero series and stays inactive — even when a real stale event
-    # would otherwise fire it. Touching labels at .0 inc creates the series
-    # without affecting counter values.
-    for change in ("new", "updated", "stale"):
-        run_entities.labels(source_id=sid_label, change=change).inc(0)
-    for outcome in ("hit", "miss"):
-        fast_path_total.labels(source_id=sid_label, outcome=outcome).inc(0)
-    for outcome in ("ok", "error"):
-        fetch_total.labels(source_id=sid_label, outcome=outcome).inc(0)
+    try:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT url, schema, anchor, identity_key, primary_model, "
+                "anchors, last_anchored_at, "
+                "conditional_polling, etag, last_modified, last_content_bytes "
+                "FROM sources WHERE id = %s",
+                (source_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise ValueError(f"source {source_id} not found")
+            (
+                url, schema, anchor, identity_key, primary_model,
+                cached_anchors, last_anchored_at,
+                conditional_polling, etag, last_modified, last_content_bytes,
+            ) = row
 
-    fetched = await _fetch_and_snapshot(source_id, url, sid_label)
-    if isinstance(fetched, dict) and "_error" in fetched:
-        return {"run_id": fetched["_error_run_id"], "error": fetched["_error"]}
-    status, html, snapshot_id = fetched  # type: ignore[misc]
+        if last_anchored_at:
+            age = (datetime.now(UTC) - last_anchored_at).total_seconds()
+            anchor_age_seconds.labels(source_id=sid_label).set(max(0.0, age))
 
-    # ---- Fast path: cached anchors → BS4 only, NEVER fall back to LLM. -----
-    # Once a source has anchors (good or broken), the LLM is OFF until the
-    # user explicitly re-anchors. This is the cost-discipline guarantee:
-    # scheduled polls cannot accidentally call the LLM.
-    if cached_anchors:
-        t0 = time.monotonic()
-        verdict = verify_anchors(html, cached_anchors, schema_fields)
-        entities = apply_anchors(html, cached_anchors, identity_field=identity_field)
-        elapsed = time.monotonic() - t0
-        fast_path_duration.labels(source_id=sid_label).observe(elapsed)
-        # Hit = BS4 produced entities. The first-run verification probe is a
-        # nice-to-have sanity but not a polling-time SLI; what matters at poll
-        # time is whether we got data out.
-        outcome = "hit" if entities else "miss"
-        fast_path_total.labels(source_id=sid_label, outcome=outcome).inc()
-
-        confidence = float(cached_anchors.get("confidence", 0.95))
-        err = None if entities else (
-            "; ".join(verdict["reasons"]) or "BS4 produced 0 entities — re-anchor required"
+        schema = schema or {}
+        schema_fields = _schema_field_names(schema)
+        anchor_fields, volatile_fields = _split_field_roles(schema)
+        identity_key = list(identity_key or [])
+        identity_field = identity_key[0] if identity_key else (
+            anchor_fields[0] if anchor_fields else (
+                schema_fields[0] if schema_fields else None
+            )
         )
+
+        for change in ("new", "updated", "stale"):
+            run_entities.labels(source_id=sid_label, change=change).inc(0)
+        for outcome in ("hit", "miss"):
+            fast_path_total.labels(source_id=sid_label, outcome=outcome).inc(0)
+        for outcome in ("ok", "error"):
+            fetch_total.labels(source_id=sid_label, outcome=outcome).inc(0)
+        for path in ("conditional_skip", "dom_fast_path", "llm_anchor"):
+            poll_total.labels(source_id=sid_label, path=path).inc(0)
+
+        fetched = await _fetch_and_snapshot(
+            source_id,
+            url,
+            sid_label,
+            conditional_polling=bool(conditional_polling) and bool(cached_anchors),
+            etag=etag,
+            last_modified=last_modified,
+            last_content_bytes=last_content_bytes,
+        )
+        if isinstance(fetched, dict) and "_error" in fetched:
+            return {"run_id": fetched["_error_run_id"], "error": fetched["_error"]}
+
+        if fetched.get("not_modified"):
+            poll_total.labels(source_id=sid_label, path="conditional_skip").inc()
+            extractions_skipped_total.labels(
+                source_id=sid_label, reason="http_304",
+            ).inc()
+            with conn() as c, c.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM entities WHERE source_id = %s AND stale = FALSE",
+                    (source_id,),
+                )
+                entity_count = cur.fetchone()[0]
+                cur.execute(
+                    "INSERT INTO runs "
+                    "(source_id, started_at, finished_at, backend, is_primary, "
+                    " confidence, entity_count, cost_usd, error) "
+                    "VALUES (%s, now(), now(), %s, TRUE, 1.0, %s, 0, NULL) "
+                    "RETURNING id",
+                    (source_id, "conditional-304", entity_count),
+                )
+                run_id = cur.fetchone()[0]
+                cur.execute(
+                    "UPDATE entities SET last_seen = now(), last_run_id = %s, "
+                    "stale = FALSE WHERE source_id = %s AND stale = FALSE",
+                    (run_id, source_id),
+                )
+            return {
+                "snapshot_id": None, "source_id": source_id,
+                "primary_model": "conditional-304",
+                "models_run": ["conditional-304"],
+                "primary": {
+                    "run_id": run_id, "entity_count": entity_count,
+                    "new": 0, "updated": 0, "stale": 0,
+                    "cost_usd": 0.0, "confidence": 1.0,
+                    "anchors_persisted": bool(cached_anchors),
+                    "source": "http-304",
+                    "error": None,
+                    "bytes_saved": fetched.get("bytes_saved", 0),
+                },
+                "fast_path": {"hit": True, "skipped": True, "reason": "http_304"},
+            }
+
+        html = fetched["html"]
+        snapshot_id = fetched["snapshot_id"]
+
+        if cached_anchors:
+            poll_total.labels(source_id=sid_label, path="dom_fast_path").inc()
+            t0 = time.monotonic()
+            verdict = verify_anchors(html, cached_anchors, schema_fields)
+            entities = apply_anchors(html, cached_anchors, identity_field=identity_field)
+            elapsed = time.monotonic() - t0
+            fast_path_duration.labels(source_id=sid_label).observe(elapsed)
+            outcome = "hit" if entities else "miss"
+            fast_path_total.labels(source_id=sid_label, outcome=outcome).inc()
+
+            anchor_extraction_count.labels(source_id=sid_label).set(len(entities))
+
+            if entities and schema_fields:
+                n = len(entities)
+                for fname in schema_fields:
+                    populated = sum(
+                        1 for e in entities
+                        if e.get(fname) is not None and str(e.get(fname)).strip()
+                    )
+                    anchor_field_population_ratio.labels(
+                        source_id=sid_label, field=fname,
+                    ).set(populated / n)
+
+            if outcome == "hit" and primary_model:
+                saved = estimate_extraction_cost(len(html), primary_model)
+                cost_saved_usd_total.labels(source_id=sid_label).inc(saved)
+
+            confidence = float(cached_anchors.get("confidence", 0.95))
+            err = None if entities else (
+                "; ".join(verdict["reasons"])
+                or "BS4 produced 0 entities — re-anchor required"
+            )
+            with conn() as c, c.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO runs "
+                    "(source_id, snapshot_id, started_at, finished_at, backend, "
+                    " is_primary, confidence, entity_count, cost_usd, error) "
+                    "VALUES (%s, %s, now(), now(), %s, TRUE, %s, %s, 0, %s) "
+                    "RETURNING id",
+                    (source_id, snapshot_id, "fast-path", confidence, len(entities), err),
+                )
+                run_id = cur.fetchone()[0]
+                new_count = updated_count = stale_count = 0
+                if entities:
+                    new_count, updated_count, stale_count = _diff_and_persist(
+                        cur, source_id, run_id, entities, identity_key,
+                        schema_fields, volatile_fields, confidence, sid_label,
+                        anchor_fields=anchor_fields,
+                    )
+                    cur.execute(
+                        "UPDATE runs SET new_count = %s, updated_count = %s, stale_count = %s "
+                        "WHERE id = %s",
+                        (new_count, updated_count, stale_count, run_id),
+                    )
+
+            log.info(
+                "fast-path src=%s outcome=%s entities=%s new=%s updated=%s stale=%s in %.0fms",
+                source_id, outcome, len(entities), new_count, updated_count, stale_count, elapsed * 1000,
+            )
+            return {
+                "snapshot_id": snapshot_id, "source_id": source_id,
+                "primary_model": "fast-path", "models_run": ["fast-path"],
+                "primary": {
+                    "run_id": run_id, "entity_count": len(entities),
+                    "new": new_count, "updated": updated_count, "stale": stale_count,
+                    "cost_usd": 0.0, "confidence": confidence,
+                    "anchors_persisted": True, "source": "anchored",
+                    "error": err,
+                    "volatile_fields": volatile_fields,
+                },
+                "fast_path": {"hit": outcome == "hit", "duration_ms": int(elapsed * 1000)},
+            }
+
+        if not primary_model:
+            raise ValueError(f"source {source_id} has no primary_model")
+
+        poll_total.labels(source_id=sid_label, path="llm_anchor").inc()
+        re_anchor_reason = "initial" if last_anchored_at is None else "re_anchor"
+        anchor_re_anchor_total.labels(
+            source_id=sid_label, reason=re_anchor_reason,
+        ).inc()
+
+        async with httpx.AsyncClient() as client:
+            result = await _call_model(client, html, schema, anchor, primary_model, identity_field)
+
+        anchors = result["anchors"]
+        verdict = {"ok": False, "reasons": ["no anchors returned"], "count": 0, "expected_count": 0}
+        primary_entities: list[dict] = []
+        source_of_entities = "none"
+        if anchors:
+            verdict = verify_anchors(html, anchors, schema_fields)
+            if verdict["ok"]:
+                primary_entities = apply_anchors(html, anchors, identity_field=identity_field)
+                source_of_entities = "anchored"
+        if not primary_entities and result["entities_from_llm"]:
+            primary_entities = result["entities_from_llm"]
+            source_of_entities = "llm-bootstrap"
+
+        if anchors:
+            with conn() as c, c.cursor() as cur:
+                cur.execute(
+                    "UPDATE sources SET anchors = %s, last_anchored_at = now() "
+                    "WHERE id = %s",
+                    (Jsonb(anchors), source_id),
+                )
+            verified = "verified" if verdict["ok"] else "UNVERIFIED — next poll will likely return 0"
+            log.info(
+                "anchored src=%s via %s (%s) — %s entities bootstrapped",
+                source_id, primary_model, verified, len(primary_entities),
+            )
+
         with conn() as c, c.cursor() as cur:
             cur.execute(
                 "INSERT INTO runs "
                 "(source_id, snapshot_id, started_at, finished_at, backend, "
                 " is_primary, confidence, entity_count, cost_usd, error) "
-                "VALUES (%s, %s, now(), now(), %s, TRUE, %s, %s, 0, %s) "
+                "VALUES (%s, %s, now(), now(), %s, TRUE, %s, %s, %s, %s) "
                 "RETURNING id",
-                (source_id, snapshot_id, "fast-path", confidence, len(entities), err),
+                (
+                    source_id, snapshot_id, primary_model,
+                    result["confidence"], len(primary_entities), result["cost_usd"],
+                    result["error"] or (
+                        "; ".join(verdict["reasons"]) if verdict["reasons"] else None
+                    ),
+                ),
             )
-            run_id = cur.fetchone()[0]
-            new_count = updated_count = stale_count = 0
-            if entities:
+            primary_run_id = cur.fetchone()[0]
+            run_cost_usd.labels(source_id=sid_label, backend=primary_model).inc(result["cost_usd"])
+
+        new_count = updated_count = stale_count = 0
+        if result["error"] is None and primary_entities:
+            confidence = result["confidence"]
+            with conn() as c, c.cursor() as cur:
                 new_count, updated_count, stale_count = _diff_and_persist(
-                    cur, source_id, run_id, entities, identity_key,
-                    schema_fields, volatile_fields, confidence, sid_label,
-                    anchor_fields=anchor_fields,
+                    cur, source_id, primary_run_id, primary_entities,
+                    identity_key, schema_fields, volatile_fields,
+                    confidence, sid_label, anchor_fields=anchor_fields,
                 )
                 cur.execute(
                     "UPDATE runs SET new_count = %s, updated_count = %s, stale_count = %s "
                     "WHERE id = %s",
-                    (new_count, updated_count, stale_count, run_id),
+                    (new_count, updated_count, stale_count, primary_run_id),
                 )
 
-        log.info(
-            "fast-path src=%s outcome=%s entities=%s new=%s updated=%s stale=%s in %.0fms",
-            source_id, outcome, len(entities), new_count, updated_count, stale_count, elapsed * 1000,
-        )
+        if anchors:
+            anchor_age_seconds.labels(source_id=sid_label).set(0)
+
         return {
             "snapshot_id": snapshot_id, "source_id": source_id,
-            "primary_model": "fast-path", "models_run": ["fast-path"],
+            "primary_model": primary_model,
+            "models_run": [primary_model],
             "primary": {
-                "run_id": run_id, "entity_count": len(entities),
+                "run_id": primary_run_id, "entity_count": len(primary_entities),
                 "new": new_count, "updated": updated_count, "stale": stale_count,
-                "cost_usd": 0.0, "confidence": confidence,
-                "anchors_persisted": True, "source": "anchored",
-                "error": err,
-                "volatile_fields": volatile_fields,
+                "cost_usd": result["cost_usd"], "confidence": result["confidence"],
+                "anchors_persisted": anchors is not None and verdict["ok"],
+                "source": source_of_entities,
+                "error": result["error"],
             },
-            "challengers": [],
-            "fast_path": {"hit": outcome == "hit", "duration_ms": int(elapsed * 1000)},
+            "fast_path": {"hit": False},
         }
-
-    # ---- First-run / re-anchor only: LLM bake-off -------------------------
-    # We only get here when cached_anchors is NULL, which happens on:
-    #   - the very first run for a source
-    #   - after an explicit POST /sources/{id}/re-anchor
-    # LLM produces anchors + a starter entity sample. We persist BOTH
-    # verbatim (no verify gate) — subsequent polls will use BS4 against
-    # whatever anchors landed here. If they're broken, the next BS4 run
-    # will return 0 and the user re-anchors manually.
-    if not primary_model:
-        raise ValueError(f"source {source_id} has no primary_model")
-
-    models_to_run = [primary_model] + [m for m in comparison_models if m != primary_model]
-
-    async with httpx.AsyncClient() as client:
-        results = await asyncio.gather(
-            *[_call_model(client, html, schema, anchor, m, identity_field) for m in models_to_run]
-        )
-
-    # For each model: prefer BS4-applied anchors when they verify. If they
-    # don't, use the LLM's first-30 entity sample as a one-time bootstrap.
-    # Either way, we cache the anchors as the canonical recipe — subsequent
-    # polls will use BS4 against them and SKIP THE LLM regardless of result.
-    per_model: list[dict[str, Any]] = []
-    for r in results:
-        anchors = r["anchors"]
-        verdict = {"ok": False, "reasons": ["no anchors returned"], "count": 0, "expected_count": 0}
-        entities = []
-        source_of_entities = "none"
-        if anchors:
-            verdict = verify_anchors(html, anchors, schema_fields)
-            if verdict["ok"]:
-                entities = apply_anchors(html, anchors, identity_field=identity_field)
-                source_of_entities = "anchored"
-        if not entities and r["entities_from_llm"]:
-            # One-time bootstrap from the LLM's first-30 sample. Subsequent
-            # polls cannot fall back here — they go through the fast-path only.
-            entities = r["entities_from_llm"]
-            source_of_entities = "llm-bootstrap"
-        per_model.append({**r, "entities": entities, "verdict": verdict, "source": source_of_entities})
-
-    primary_pm = per_model[0]
-    primary_entities = primary_pm["entities"]
-    primary_identities = {identity_for(e, identity_key, schema_fields) for e in primary_entities}
-
-    # ALWAYS persist the LLM's anchors, verified or not. This is the
-    # "first pass build anchoring" contract: the LLM gets one shot per
-    # re-anchor. Whatever it produced becomes the canonical recipe until
-    # the user explicitly invalidates via POST /sources/{id}/re-anchor.
-    if primary_pm["anchors"]:
-        with conn() as c, c.cursor() as cur:
-            cur.execute(
-                "UPDATE sources SET anchors = %s, last_anchored_at = now() "
-                "WHERE id = %s",
-                (Jsonb(primary_pm["anchors"]), source_id),
-            )
-        verified = "verified" if primary_pm["verdict"]["ok"] else "UNVERIFIED — next poll will likely return 0"
-        log.info(
-            "anchored src=%s via %s (%s) — %s entities bootstrapped",
-            source_id, primary_model, verified, len(primary_entities),
-        )
-
-    # Persist a run row per model
-    run_rows: list[dict[str, Any]] = []
-    primary_run_id: int | None = None
-    with conn() as c, c.cursor() as cur:
-        for r in per_model:
-            is_primary = r["model"] == primary_model
-            agreement: float | None = None
-            if not is_primary:
-                challenger_idents = {identity_for(e, identity_key, schema_fields) for e in r["entities"]}
-                agreement = _jaccard(primary_identities, challenger_idents)
-                agreement_jaccard.labels(
-                    source_id=sid_label, primary=primary_model, challenger=r["model"]
-                ).set(agreement)
-
-                # Per-field agreement on intersection of identities
-                pby = {identity_for(e, identity_key, schema_fields): e for e in primary_entities}
-                cby = {identity_for(e, identity_key, schema_fields): e for e in r["entities"]}
-                common = set(pby.keys()) & set(cby.keys())
-                if common and schema_fields:
-                    for fname in schema_fields:
-                        matches, comparable = 0, 0
-                        for ident in common:
-                            pv, cv = pby[ident].get(fname), cby[ident].get(fname)
-                            if pv is None and cv is None:
-                                continue
-                            comparable += 1
-                            if pv == cv:
-                                matches += 1
-                        if comparable:
-                            field_agreement.labels(
-                                source_id=sid_label, primary=primary_model,
-                                challenger=r["model"], field=fname,
-                            ).set(matches / comparable)
-
-            cur.execute(
-                "INSERT INTO runs "
-                "(source_id, snapshot_id, started_at, finished_at, backend, "
-                " is_primary, confidence, entity_count, cost_usd, agreement, error) "
-                "VALUES (%s, %s, now(), now(), %s, %s, %s, %s, %s, %s, %s) "
-                "RETURNING id",
-                (
-                    source_id, snapshot_id, r["model"], is_primary,
-                    r["confidence"], len(r["entities"]), r["cost_usd"],
-                    agreement, r["error"] or ("; ".join(r["verdict"]["reasons"]) if r["verdict"]["reasons"] else None),
-                ),
-            )
-            run_id = cur.fetchone()[0]
-            if is_primary:
-                primary_run_id = run_id
-
-            run_confidence.labels(source_id=sid_label, backend=r["model"]).observe(r["confidence"])
-            run_cost_usd.labels(source_id=sid_label, backend=r["model"]).inc(r["cost_usd"])
-            if not is_primary:
-                escalations_total.labels(source_id=sid_label, model=r["model"]).inc()
-
-            run_rows.append({
-                "run_id": run_id, "model": r["model"], "is_primary": is_primary,
-                "confidence": r["confidence"], "entity_count": len(r["entities"]),
-                "cost_usd": r["cost_usd"], "duration_s": round(r["duration_s"], 3),
-                "agreement": agreement,
-                "error": r["error"],
-                "anchors_ok": r["verdict"]["ok"],
-            })
-
-    # Diff primary entities into entities table — works whether the entities
-    # came from BS4-applied anchors or from the LLM's direct extraction.
-    new_count = updated_count = stale_count = 0
-    if primary_run_id is not None and primary_pm["error"] is None and primary_entities:
-        confidence = primary_pm["confidence"]
-        with conn() as c, c.cursor() as cur:
-            new_count, updated_count, stale_count = _diff_and_persist(
-                cur, source_id, primary_run_id, primary_entities,
-                identity_key, schema_fields, volatile_fields,
-                confidence, sid_label, anchor_fields=anchor_fields,
-            )
-            cur.execute(
-                "UPDATE runs SET new_count = %s, updated_count = %s, stale_count = %s "
-                "WHERE id = %s",
-                (new_count, updated_count, stale_count, primary_run_id),
-            )
-
-    return {
-        "snapshot_id": snapshot_id, "source_id": source_id,
-        "primary_model": primary_model,
-        "models_run": [r["model"] for r in run_rows],
-        "primary": {
-            "run_id": primary_run_id, "entity_count": len(primary_entities),
-            "new": new_count, "updated": updated_count, "stale": stale_count,
-            "cost_usd": primary_pm["cost_usd"], "confidence": primary_pm["confidence"],
-            "anchors_persisted": primary_pm["anchors"] is not None and primary_pm["verdict"]["ok"],
-            "source": primary_pm.get("source", "none"),
-        },
-        "challengers": [r for r in run_rows if not r["is_primary"]],
-        "fast_path": {"hit": False},
-    }
+    finally:
+        poll_duration.labels(source_id=sid_label).observe(time.monotonic() - poll_t0)

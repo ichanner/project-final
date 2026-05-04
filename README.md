@@ -1,180 +1,93 @@
 # WebHarvest
 
-A small system for watching structured data on the web — listings, tables, repeating cards — and telling you when fields actually change. Built as a course project for DevOps Principles and Practices, so the focus is the operational surface (containers, CI/CD, security scanning, metrics, alerts) rather than research-grade extraction.
+WebHarvest is my DevOps final project: a small web app that watches structured data on public pages and shows whether the polling system is healthy.
 
-The thing that makes it interesting, in one sentence: **the LLM runs once per source to learn a CSS-selector recipe; every poll after that is BeautifulSoup against the cached recipe — sub-second, zero cost.**
+The user-facing flow is simple. Add a URL, describe the repeated thing on the page, build a schema, and mark fields as either stable **anchor** fields or changing **volatile** fields. The first run asks an LLM to build a DOM recipe. After that, cron jobs poll the page with conditional HTTP and use BeautifulSoup against the cached recipe. Runs, entities, anchors, HTTP validators, and field changes are all stored in Postgres.
 
-The Wikipedia source in this repo polls 113 entities every minute for $0. The DeFi source polls **1,526 entities** every minute for $0. There's no caching trick or distillation — the LLM just teaches the system what to grab once, and a deterministic CSS engine takes over forever.
+The point of the project is not model comparison. The DevOps comparison is:
 
-## Reading order
+> naive full-page polling vs conditional HTTP polling with `ETag` / `Last-Modified`.
 
-| File | What's in it |
+The unique piece is:
+
+> the LLM is a one-time setup step, not a recurring polling dependency.
+
+## What To Show In The Demo
+
+1. Start the stack with Docker Compose.
+2. Open the React dashboard.
+3. Add a source with URL + schema + anchor/volatile fields.
+4. Run it once so the LLM creates and stores DOM anchors.
+5. Run it again or wait for cron.
+6. Show that steady-state runs use either `conditional-304` or `fast-path`, not recurring LLM calls.
+7. Open Grafana and show the operational dashboard.
+
+## Services
+
+The compose stack runs seven services:
+
+| Service | Job |
 | --- | --- |
-| [README.md](./README.md) | This. Setup, architecture, DevOps stack, scope cuts. |
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | Service graph, request lifecycle, what each metric measures, the trade-offs. |
-| [EVALUATION.md](./EVALUATION.md) | Real numbers from real runs: 4 cloud models compared, fast-path SLI, cost per source. |
-| [SWOT_ANALYSIS.md](./SWOT_ANALYSIS.md) | One engineer's modified SWOT for every tool the project picked. |
-| [CHANGELOG.md](./CHANGELOG.md) | What changed across 0.1, 0.2, 0.3. |
-| [AI_DISCLOSURE.md](./AI_DISCLOSURE.md) | How AI assistance was used (per syllabus citation requirement). What I designed vs. what was AI-stitched. |
+| `postgres` | Stores sources, validators, anchors, snapshots, runs, entities, and field changes. |
+| `scraper` | FastAPI app for source setup, manual runs, entities, snapshots, and metrics. |
+| `worker` | APScheduler cron worker that polls sources from Postgres. |
+| `extracto` | Node service that calls the selected LLM only for first-run or re-anchor. |
+| `dashboard` | React/nginx UI for source setup and entity inspection. |
+| `prometheus` | Scrapes metrics and evaluates alert rules. |
+| `grafana` | Provisioned operational dashboard. |
 
-## Architecture
-
-```
-                          OpenRouter (one HTTPS endpoint, 4 models)
-                          ├── anthropic/claude-sonnet-4
-                          ├── openai/gpt-4o
-                          ├── meta-llama/llama-3.3-70b-instruct
-                          └── google/gemini-2.0-flash-001
-                                       ▲
-                                       │  HTTP /extract  (only on first run / re-anchor)
-                                       │
-   ┌──────────┐   /api  ┌──────────┐  ┌────────┐
-   │ Dashboard│────────▶│ Scraper  │──│Extracto│
-   │  React   │         │ FastAPI  │  │ Node   │
-   └────┬─────┘         └────┬─────┘  └────────┘
-        │ proxies            │
-        │                    │ scheduled run from worker
-        │              ┌─────┴────────┐
-        │              ▼              ▼
-        │       ┌──────────┐    ┌──────────┐
-        │       │ Postgres │    │ Worker   │  separate container
-        │       │ sources, │    │ APSched  │  reconciles cron from DB
-        │       │ runs,    │    │ every 30s│
-        │       │ entities,│    └──────────┘
-        │       │ entity_  │
-        │       │ changes  │
-        │       └─────┬────┘
-        │             │
-        │       ┌─────▼──────┐    ┌──────────┐
-        └──────▶│ Prometheus │───▶│ Grafana  │  Prom + Postgres datasources
-                └────────────┘    └──────────┘
-```
-
-Six application services in compose: `scraper`, `extracto`, `worker`, `dashboard`, `postgres`, `prometheus`, `grafana`. The worker is a deliberate API/worker split — the scraper handles HTTP, the worker owns the cron schedule and polls Postgres every 30s for changes.
-
-## Quick start
+## Quick Start
 
 ```sh
 cp .env.example .env
-# edit .env, set OPENROUTER_API_KEY=sk-or-v1-...
 docker compose -f docker-compose.yml -f docker-compose.test.yml up --build
 ```
 
-Open `http://localhost:3000`. Hit a preset (HN / DeFi / Lobsters / Largest US companies), or paste any URL.
+Set `OPENROUTER_API_KEY` in `.env` before running real LLM anchoring.
 
-The schema builder is the front door: name your fields, pick types, mark which ones are **volatile** (the values you actually want to watch — price, score, count). Everything else is treated as anchor signal — used to identify the entity, not counted as drift.
+Open:
 
-## Adding a source
+- Dashboard: `http://localhost:3000`
+- Grafana: `http://localhost:3001/d/webharvest`
+- Prometheus: `http://localhost:9090`
 
-```sh
-curl -X POST http://localhost:3000/api/sources -H 'Content-Type: application/json' -d '{
-  "url": "https://en.wikipedia.org/wiki/List_of_largest_companies_in_the_United_States_by_revenue",
-  "label": "Largest US companies",
-  "anchor": "the main table of largest US companies by revenue",
-  "schema": {"fields": {
-    "name":         {"type": "string", "role": "anchor"},
-    "industry":     {"type": "string", "role": "anchor"},
-    "headquarters": {"type": "string", "role": "anchor"},
-    "rank":         {"type": "string", "role": "volatile"},
-    "revenue_usd":  {"type": "string", "role": "volatile"},
-    "employees":    {"type": "string", "role": "volatile"}
-  }},
-  "primary_model": "anthropic/claude-sonnet-4",
-  "comparison_models": [],
-  "refresh_cron": "*/2 * * * *"
-}'
+## Operational Metrics
 
-curl -X POST http://localhost:3000/api/sources/1/run
-```
+These metrics are the evidence for the dashboard and SWOT:
 
-First run calls the LLM (~$0.17 for Claude on a 160KB Wikipedia page). Every run after that uses BS4 against the cached recipe (~50ms, $0).
-
-## Models
-
-Per-1M-token pricing (USD). Pricing table lives in `services/extracto/src/anthropicClient.js` — update it when OpenRouter changes rates.
-
-| Slug | Input | Output | What I actually use it for |
-| --- | --- | --- | --- |
-| `anthropic/claude-sonnet-4` | 3.00 | 15.00 | Default primary. Most reliable structured output of the four. |
-| `openai/gpt-4o` | 2.50 | 10.00 | Fast challenger. ~30% cheaper than Claude, agreed 100% on HN. |
-| `meta-llama/llama-3.3-70b-instruct` | 0.13 | 0.40 | Budget pick. ~25× cheaper, drops to ~80% agreement on harder pages. |
-| `google/gemini-2.0-flash-001` | 0.10 | 0.40 | Cheapest when it works. Free-tier 429s often during the project. |
-
-## What's actually new in 0.3.0
-
-The big architectural pieces that landed this release:
-
-- **LLM-bootstrapped DOM anchoring + BS4 fast-path.** First run produces a CSS-selector recipe. Every subsequent poll is BeautifulSoup. The LLM physically cannot be invoked by the scheduled cron — it's only callable when `sources.anchors IS NULL` (first run or explicit re-anchor).
-- **Field roles**: every schema field is `anchor` (default) or `volatile`. Drift only counts on volatile fields. Anchor flicker (whitespace, footnote markers, BS4 binding noise) is silently absorbed.
-- **Anchor cross-check**: when BS4 produces a row whose anchor field values disagree with the stored entity's anchors, the row is rejected as a wrong-bind. Caught the Wikipedia multi-table flicker that was producing 18 phantom updates per poll.
-- **First-occurrence dedup**: when the root selector matches the same identity in multiple page regions (common on pages with companion tables), only the first DOM occurrence is kept. Stable across re-scrapes.
-- **Worker container** owns the scheduler. Real DevOps API/worker split. The scraper API handles HTTP; the worker reconciles `sources.refresh_cron` from Postgres every 30 seconds.
-- **Schema builder UI** in the React app — type a URL, add fields with name/type/volatile, click a model preset, optionally hit "add and run."
-- **Per-entity history**: click any entity in the dashboard → expanded inline view with sparklines for numeric volatile fields and a full change log.
-
-## Scope cuts (be honest)
-
-These were called out in the original spec; some shipped, some didn't.
-
-- **Distilled local model on llama.cpp** — replaced by a Python heuristic in 0.1, then dropped entirely in 0.2. The cloud-vs-local comparison the original proposal pitched isn't the headline anymore. The cloud-model bake-off is.
-- **Wayback Machine training pipeline** — never built. Its consumer was the distilled model.
-- **Web search source discovery** — never built. Sources are added by URL.
-- **Pagination auto-detection** — never built. Single-page extraction only.
-- **JS-rendered SPAs** — partial. The system happily anchors any page where the data is in the HTTP response. For pages that render data client-side (most modern dashboards), our `httpx.get()` returns a shell and the LLM has nothing to anchor. Two ways out, neither built: a Playwright-based fetcher for those sources, or smart detection + warning.
-
-## DevOps surface
-
-| Concern | Tool |
+| Metric | Why it matters |
 | --- | --- |
-| Containers | One Dockerfile per service, multi-stage where it matters, non-root, healthchecks. |
-| Orchestration | `docker-compose.yml` with healthcheck-gated dependencies. Worker container splits scheduler from API. |
-| CI | `.github/workflows/ci.yml` — ruff + eslint + pytest + node:test, then `docker compose build` smoke gate. |
-| Image vulnerability scan | Trivy against each built image and the repo filesystem. SARIF uploaded to GitHub code scanning. |
-| Dependency audit | `pip-audit` (Python services) + `npm audit --audit-level=high` (Node services). |
-| Secret scan | Gitleaks on every PR and push. |
-| Metrics | `prometheus_client` (Python) + `prom-client` (Node), `/metrics` on every service. |
-| Visualization | Grafana auto-provisioned with two dashboards (main + entity-history drilldown), Prom + Postgres datasources. |
-| Alerting | 5 Prometheus rules: drift, model agreement, cost surge, stale spike, fast-path hit-rate floor. |
-| Integration test | `integration.yml` — full stack-up against fixture nginx, end-to-end create / run / re-run. |
-| Image publishing | `deploy.yml` — on `v*` tags, builds and pushes all images to GHCR with SLSA provenance + SBOM. |
-| Dependency updates | Dependabot for actions, pip, npm, Docker base images (weekly). |
+| `webharvest_fetch_requests_total{mode,result}` | Shows naive vs conditional polling outcomes. |
+| `webharvest_fetch_bytes_total{mode}` | Shows bandwidth used by each polling strategy. |
+| `webharvest_fetch_bytes_saved_total` | Shows bytes avoided by HTTP 304 responses. |
+| `webharvest_extractions_skipped_total{reason="http_304"}` | Shows extraction work skipped because the page did not change. |
+| `webharvest_poll_total{path}` | Shows whether a run was `conditional_skip`, `dom_fast_path`, or `llm_anchor`. |
+| `webharvest_fast_path_total{outcome}` | Shows whether cached DOM anchors are still working. |
+| `webharvest_cost_saved_usd_total` | Estimates avoided cost compared with calling the LLM every poll. |
+| `webharvest_field_changes_total{field}` | Shows real drift on volatile fields. |
+| `webharvest_fetch_errors_total{error_class}` | Breaks down network and source failures. |
+| `webharvest_polls_skipped_total{reason}` | Shows cron misfires or blocked overlapping jobs. |
 
-## What the dashboard surfaces
+## Grafana Dashboard
 
-Two Grafana dashboards under `/grafana/`:
+The main dashboard is intentionally operational:
 
-**WebHarvest (`/d/webharvest`)** — main board.
-- Stat tiles: field changes (1h), updated entities (1h), active sources, total spend.
-- **Field change rate per source × field** — the headline drift signal.
-- **Top changing fields (last 1h)** — bar gauge of where churn is concentrated.
-- **Most volatile entities (Postgres)** — table sortable by recent change activity, color-coded.
-- **Fast-path hit rate** — per-source SLI. Healthy = 95%+. Drops mean anchors are failing and you should re-anchor.
-- **Bake-off section**: cost-by-model, latency p95 by model, set-level agreement (Jaccard), per-field agreement, agreement matrix.
-- Source health: fetches/min, entities-by-change-type, recent runs.
+- System health: poll rate, fetch errors, cron skips, active sources.
+- Polling comparison: conditional hit rate, bytes saved, skipped extractions, unsupported sources.
+- Extraction efficiency: DOM fast-path hit rate, LLM spend, cost saved, anchor age.
+- Entity drift: volatile field changes, entity transitions, recent runs.
 
-**WebHarvest — Entity history (`/d/webharvest-entity`)** — drilldown. Pick an entity, see its full timeline + numeric field history + change log.
+## SWOT
 
-## Local dev (without Docker)
+`SWOT_ANALYSIS.md` is the only evaluation write-up. It is tied to the metrics above instead of generic tool pros and cons. The SWOT covers Docker Compose, Postgres, cron scheduling, Prometheus/Grafana, GitHub Actions/GHCR, naive polling, conditional polling, and LLM-bootstrapped DOM extraction.
 
-```sh
-(cd services/scraper && pip install -r requirements-dev.txt && uvicorn src.main:app --port 8080)
-(cd services/scraper && python -m src.worker)
-(cd services/extracto && npm install && npm start)
-(cd services/dashboard && npm install && npm run dev)
-```
+## DevOps Pieces
 
-Postgres at `DATABASE_URL`, `OPENROUTER_API_KEY` in env.
+- Docker Compose for the local environment.
+- Postgres for operational state and history.
+- APScheduler cron jobs in a separate worker container.
+- Prometheus metrics and alert rules.
+- Grafana dashboard provisioned from repo JSON.
+- GitHub Actions for clean-runner checks, security scanning, and optional GHCR publishing.
 
-## On the development history of this repo
-
-The clean linear history you see here isn't the full story. Development of this project was an exploration — I had it running across several local setups (different machines, different docker daemons, different OpenRouter accounts at different points). A couple of those setups corrupted themselves along the way: a docker volume that got wedged after a forced kill, a Postgres init that didn't re-run after a partial schema change, a worktree that ended up with merge artifacts I couldn't cleanly reconcile.
-
-The architecture also changed shape several times mid-build. The original spec had a llama.cpp distilled local model trained on Wayback snapshots. The first cut replaced that with a Python heuristic. The second cut dropped the heuristic entirely and made it a four-model cloud bake-off. The third cut introduced LLM-bootstrapped DOM anchoring with BS4 fast-path and the volatile/anchor field role split. Each turn was responding to something the previous version got wrong — credit drain, phantom drift, fragile selectors.
-
-Eventually I compiled everything I'd learned across those experiments, scaled back to what was actually demonstrably working, and merged the pieces into one shippable codebase. That's what's in this repo. The public repository captures the final state — the local exploration is not preserved as a clean commit graph because most of it wasn't worth preserving. What survived made it in; what didn't, didn't.
-
-If you're reading this with an eye to evaluating whether the project did what the rubric asked, the answer is in the running system more than in the git log: bring it up, hit a preset, watch the dashboards populate.
-
-## License
-
-MIT.
+That is the final story: define a source, anchor it once, poll it cheaply, persist the changes, and make the operation visible.

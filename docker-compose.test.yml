@@ -1,10 +1,3 @@
-# Overlay used by integration tests AND for demoing the JSON-LD/table fixtures.
-# Adds a static-HTML fixture server and exposes the scraper API on the host. Use:
-#   docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build
-#
-# Note: this overlay does NOT clobber OPENROUTER_API_KEY — the integration test
-# only exercises the heuristic path, but a demo using the same overlay should
-# still be able to escalate to a cloud model.
 services:
   fixture:
     image: nginx:1.27-alpine

@@ -5,7 +5,6 @@ from typing import Any
 
 from bs4 import BeautifulSoup, Tag
 
-
 _NUM_RE = re.compile(r"-?\d+(?:[\.,]\d+)*")
 
 
@@ -53,7 +52,6 @@ def apply_anchors(
     identity_field: str | None = None,
 ) -> list[dict[str, Any]]:
     
-    #apply an anchor recipe to HTML and return entities.
     
     if not anchors or not anchors.get("root_selector"):
         return []

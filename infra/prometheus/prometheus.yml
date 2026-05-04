@@ -10,6 +10,10 @@ scrape_configs:
     static_configs:
       - targets: ["scraper:8080"]
 
+  - job_name: worker
+    static_configs:
+      - targets: ["worker:8083"]
+
   - job_name: extracto
     static_configs:
       - targets: ["extracto:8081"]

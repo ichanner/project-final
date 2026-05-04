@@ -1,9 +1,7 @@
 import OpenAI from "openai";
 
-// All cloud calls go through OpenRouter. The filename is historical — it used
-// to wrap the Anthropic SDK directly.
 export const client = new OpenAI({
-  apiKey: process.env.OPENROUTER_API_KEY,
+  apiKey: process.env.OPENROUTER_API_KEY || "missing",
   baseURL: "https://openrouter.ai/api/v1",
   defaultHeaders: {
     "HTTP-Referer": "https://github.com/ichanner/project-final",
@@ -11,14 +9,9 @@ export const client = new OpenAI({
   },
 });
 
-// Default model when a request omits one. Per-source model selection is the
-// normal path; this is just the fallback.
 export const DEFAULT_MODEL =
   process.env.EXTRACTO_DEFAULT_MODEL || "anthropic/claude-sonnet-4";
 
-// Per-1M-token pricing (USD). These match OpenRouter's published rates as of
-// April 2026 for the four models we route across. If you add a model, add it
-// here too — otherwise cost reports will read 0 for that model.
 export const PRICING = {
   "anthropic/claude-sonnet-4":         { input: 3.00,  output: 15.00 },
   "openai/gpt-4o":                     { input: 2.50,  output: 10.00 },

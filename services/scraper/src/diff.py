@@ -11,7 +11,6 @@ def identity_for(
     identity_key: list[str],
     schema_fields: list[str] | None = None,
 ) -> str:
-    # stable identity string for an entity
     if identity_key:
         return "||".join(str(entity.get(k, "")).strip() for k in identity_key)
     if schema_fields:

@@ -34,9 +34,6 @@ services:
       EXTRACTO_URL: http://extracto:8081
     expose: ["8080"]
 
-  # Background scheduler — same image as scraper, different entrypoint.
-  # Owns the per-source cron jobs. Reconciles from Postgres every 30s, so
-  # editing a source's cron in the UI propagates without restart.
   worker:
     build: ./services/scraper
     restart: unless-stopped
@@ -46,7 +43,9 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-webharvest}:${POSTGRES_PASSWORD:-webharvest}@postgres:5432/${POSTGRES_DB:-webharvest}
       EXTRACTO_URL: http://extracto:8081
+      WORKER_METRICS_PORT: "8083"
     command: ["python", "-m", "src.worker"]
+    expose: ["8083"]
 
   dashboard:
     build: ./services/dashboard

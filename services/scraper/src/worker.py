@@ -16,13 +16,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 
+from apscheduler.events import EVENT_JOB_MAX_INSTANCES, EVENT_JOB_MISSED
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from prometheus_client import start_http_server
 
-from .db import conn
+from .db import conn, ensure_runtime_schema
+from .metrics import polls_skipped_total
 from .runner import run_source
+
+WORKER_METRICS_PORT = int(os.environ.get("WORKER_METRICS_PORT", "8083"))
 
 log = logging.getLogger("worker")
 logging.basicConfig(
@@ -54,8 +60,37 @@ async def _safe_run(source_id: int) -> None:
             primary.get("stale", 0),
             primary.get("cost_usd", 0.0),
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("scheduled run failed src=%s", source_id)
+
+
+def _source_id_from_event(event) -> str | None:
+    """Extract source_id from an APScheduler event whose job_id is 'source-N'."""
+    if not event.job_id or not event.job_id.startswith("source-"):
+        return None
+    return event.job_id[len("source-"):]
+
+
+def _on_job_missed(event) -> None:
+    """Scheduler tried to fire a job at its scheduled time but couldn't (e.g.
+    misfire_grace_time exceeded — usually means the system was paused or the
+    event loop was blocked)."""
+    sid = _source_id_from_event(event)
+    if sid is not None:
+        polls_skipped_total.labels(source_id=sid, reason="misfire").inc()
+        log.warning("scheduled poll missed src=%s (misfire grace exceeded)", sid)
+
+
+def _on_max_instances_blocked(event) -> None:
+    """Previous run is still in flight when the next cron tick fires. Our
+    `max_instances=1` config means the new tick is dropped — the in-flight
+    poll wins. Surfaces as poll-skipped-because-pile-up."""
+    sid = _source_id_from_event(event)
+    if sid is not None:
+        polls_skipped_total.labels(source_id=sid, reason="max_instances_blocked").inc()
+        log.warning(
+            "scheduled poll dropped src=%s (previous run still in flight)", sid,
+        )
 
 
 def _reconcile(scheduler: AsyncIOScheduler) -> None:
@@ -63,7 +98,6 @@ def _reconcile(scheduler: AsyncIOScheduler) -> None:
     have = {j.id for j in scheduler.get_jobs() if j.id.startswith("source-")}
     wanted_ids = {_job_id(sid) for sid in wanted}
 
-    # Add or update jobs
     for sid, cron in wanted.items():
         job_id = _job_id(sid)
         if not cron:
@@ -73,10 +107,9 @@ def _reconcile(scheduler: AsyncIOScheduler) -> None:
             continue
         try:
             trigger = CronTrigger.from_crontab(cron)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.warning("invalid cron for src=%s ('%s'): %s", sid, cron, e)
             continue
-        # APScheduler treats add_job(replace_existing=True) as an upsert.
         scheduler.add_job(
             _safe_run,
             trigger=trigger,
@@ -88,14 +121,20 @@ def _reconcile(scheduler: AsyncIOScheduler) -> None:
             max_instances=1,
         )
 
-    # Remove jobs whose source is gone
     for stale_id in have - wanted_ids:
         scheduler.remove_job(stale_id)
         log.info("removed orphan job %s", stale_id)
 
 
 async def main() -> None:
+    ensure_runtime_schema()
+
+    start_http_server(WORKER_METRICS_PORT)
+    log.info("worker /metrics listening on :%s", WORKER_METRICS_PORT)
+
     scheduler = AsyncIOScheduler()
+    scheduler.add_listener(_on_job_missed, EVENT_JOB_MISSED)
+    scheduler.add_listener(_on_max_instances_blocked, EVENT_JOB_MAX_INSTANCES)
     scheduler.start()
     log.info("worker started — initial reconcile")
     _reconcile(scheduler)
@@ -109,7 +148,7 @@ async def main() -> None:
         while not stop_event.is_set():
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=30.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 _reconcile(scheduler)
     finally:
         log.info("worker shutting down")

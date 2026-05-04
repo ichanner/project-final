@@ -1,13 +1,5 @@
 import { client, DEFAULT_MODEL, estimateCost } from "./anthropicClient.js";
 
-// Hybrid mode: a single LLM call returns a CSS-selector recipe AND the
-// FIRST FEW entities as a verification probe. The recipe is the cost-saver
-// (cached, BS4-applied on subsequent polls). The 3-entity sample is a
-// fallback for when BS4 verification fails — limited but sufficient to keep
-// the system useful while we wait for a re-anchor.
-//
-// We deliberately do NOT request the full entity list — page can have 1000+
-// rows and the response would blow past max_tokens. BS4 handles bulk extract.
 const HYBRID_SYSTEM_PROMPT = `You receive raw HTML from a single web page and a description of a homogeneous collection of entities. You return a JSON object with:
 
 (1) A CSS-selector RECIPE that a downstream BeautifulSoup engine will apply on every future poll. Subsequent polls will NOT call you — they apply this recipe deterministically. So getting it right matters.
@@ -35,7 +27,6 @@ The schema you receive includes a "role" annotation per field. Honor it. Volatil
 
 const HTML_HARD_CAP = Number(process.env.EXTRACTO_HTML_CAP ?? 300_000);
 
-// Strip noise (head, scripts, styles, comments, svgs) before applying byte cap.
 function preprocessHtml(html) {
   return html
     .replace(/<!--[\s\S]*?-->/g, "")
@@ -46,9 +37,6 @@ function preprocessHtml(html) {
     .replace(/<head\b[^<]*(?:(?!<\/head>)<[^<]*)*<\/head>/gi, "<head></head>");
 }
 
-// Try to focus on the most data-rich content area before applying the cap.
-// Most pages put nav/header/footer in known places; we prefer <main>,
-// <article>, or the largest table/list block when present.
 function focusContent(html) {
   const mainMatch = html.match(/<main\b[\s\S]*?<\/main>/i);
   if (mainMatch && mainMatch[0].length > 1000) return mainMatch[0];
@@ -60,10 +48,8 @@ function focusContent(html) {
 function trimHtml(html) {
   const cleaned = preprocessHtml(html);
   if (cleaned.length <= HTML_HARD_CAP) return cleaned;
-  // First try: focus on a content region.
   const focused = focusContent(cleaned);
   if (focused.length <= HTML_HARD_CAP) return focused;
-  // Otherwise: start at <body> if available, else just slice.
   const bodyMatch = focused.match(/<body\b[^>]*>/i);
   const start = bodyMatch ? bodyMatch.index : 0;
   return focused.slice(start, start + HTML_HARD_CAP);
@@ -162,9 +148,6 @@ export async function extract({ html, schema, anchor, model, identity_field }) {
 
   const response = await client.chat.completions.create({
     model: useModel,
-    // Anchor recipe ~600 tokens + 30 entity sample @ ~80 tokens each = ~3000.
-    // 8000 leaves headroom for chatty models without blowing past 128K context
-    // limit on gpt-4o (input HTML is the main consumer there, not output).
     max_tokens: Number(process.env.EXTRACTO_MAX_TOKENS ?? 8000),
     messages: [
       { role: "system", content: sys },
@@ -196,14 +179,13 @@ export async function extract({ html, schema, anchor, model, identity_field }) {
     root_selector: parsed.root_selector,
     expected_count: parsed.expected_count ?? entities.length,
     fields: parsed.fields ?? {},
-    // Use the first LLM entity as the BS4 verification probe.
     verification: entities[0] ?? null,
   } : null;
 
   return {
     model: useModel,
     anchors,
-    entities,                     // direct fallback if anchors fail BS4 verification
+    entities,
     confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.0,
     cost_usd: estimateCost(useModel, response.usage),
     usage: response.usage,

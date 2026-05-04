@@ -14,7 +14,6 @@ and GET /sources/{sid}/changes. Same data is in Prometheus as
 from __future__ import annotations
 
 import logging
-import os
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -24,7 +23,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 from starlette.responses import Response
 
-from .db import conn
+from .db import conn, ensure_runtime_schema
 from .runner import run_source
 
 log = logging.getLogger("scraper")
@@ -36,12 +35,10 @@ class SourceIn(BaseModel):
     label: str | None = None
     schema_: dict[str, Any] = Field(default_factory=dict, alias="schema")
     anchor: str | None = None
-    # If empty, the implicit identity is the value of the first declared
-    # schema field. Composite keys still possible via the API.
     identity_key: list[str] = Field(default_factory=list)
     refresh_cron: str | None = None
+    conditional_polling: bool = True
     primary_model: str | None = None
-    comparison_models: list[str] = Field(default_factory=list)
 
     model_config = {"populate_by_name": True, "protected_namespaces": ()}
 
@@ -50,20 +47,17 @@ class SourcePatch(BaseModel):
     """Partial update — only fields present on the body are touched."""
     label: str | None = None
     refresh_cron: str | None = None
+    conditional_polling: bool | None = None
     primary_model: str | None = None
-    comparison_models: list[str] | None = None
     anchor: str | None = None
     schema_: dict[str, Any] | None = Field(default=None, alias="schema")
 
     model_config = {"populate_by_name": True, "protected_namespaces": ()}
 
 
-# Note: scheduling is owned by the worker container (services/scraper/src/worker.py).
-# This API only persists source config to Postgres; the worker reconciles
-# every 30s and adjusts its own APScheduler jobs accordingly.
-
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    ensure_runtime_schema()
     log.info("scraper api started")
     yield
     log.info("scraper api shutting down")
@@ -71,8 +65,6 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="WebHarvest Scraper", lifespan=lifespan)
 
-
-# ---------- Health / metrics ----------
 
 @app.get("/health")
 def health() -> dict[str, str]:
@@ -84,14 +76,13 @@ def metrics() -> Response:
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
-# ---------- Sources ----------
-
 @app.get("/sources")
 def list_sources() -> list[dict[str, Any]]:
     with conn() as c, c.cursor() as cur:
         cur.execute(
             "SELECT s.id, s.url, s.label, s.schema, s.anchor, s.identity_key, "
-            "s.refresh_cron, s.primary_model, s.comparison_models, "
+            "s.refresh_cron, s.conditional_polling, s.etag, s.last_modified, "
+            "s.last_content_bytes, s.primary_model, "
             "s.last_anchored_at, "
             "(s.anchors IS NOT NULL) AS has_anchors, "
             "s.created_at, "
@@ -113,14 +104,14 @@ def create_source(src: SourceIn) -> dict[str, Any]:
     with conn() as c, c.cursor() as cur:
         cur.execute(
             "INSERT INTO sources "
-            "(url, label, schema, anchor, identity_key, refresh_cron, "
-            " primary_model, comparison_models) "
+            "(url, label, schema, anchor, identity_key, refresh_cron, conditional_polling, "
+            " primary_model) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (url) DO UPDATE SET label = EXCLUDED.label, "
             "schema = EXCLUDED.schema, anchor = EXCLUDED.anchor, "
             "identity_key = EXCLUDED.identity_key, refresh_cron = EXCLUDED.refresh_cron, "
+            "conditional_polling = EXCLUDED.conditional_polling, "
             "primary_model = EXCLUDED.primary_model, "
-            "comparison_models = EXCLUDED.comparison_models, "
             "updated_at = now() RETURNING id",
             (
                 src.url,
@@ -129,8 +120,8 @@ def create_source(src: SourceIn) -> dict[str, Any]:
                 src.anchor,
                 src.identity_key,
                 src.refresh_cron,
+                src.conditional_polling,
                 src.primary_model,
-                src.comparison_models,
             ),
         )
         sid = cur.fetchone()[0]
@@ -143,7 +134,6 @@ def patch_source(source_id: int, patch: SourcePatch) -> dict[str, Any]:
     cached DOM anchors are invalidated — they were derived against the old
     schema and may not produce the right fields anymore."""
     fields = patch.model_dump(exclude_unset=True, by_alias=False)
-    # SourcePatch declares schema_; allow either alias.
     if "schema_" in fields:
         fields["schema"] = Jsonb(fields.pop("schema_"))
 
@@ -156,7 +146,6 @@ def patch_source(source_id: int, patch: SourcePatch) -> dict[str, Any]:
         sets.append(f"{k} = %s")
         vals.append(v)
     if schema_changed:
-        # invalidate anchors so the next run re-extracts them
         sets += ["anchors = NULL", "last_anchored_at = NULL"]
     sets.append("updated_at = now()")
     vals.append(source_id)
@@ -180,7 +169,7 @@ def patch_source(source_id: int, patch: SourcePatch) -> dict[str, Any]:
 
 @app.post("/sources/{source_id}/re-anchor")
 def re_anchor(source_id: int) -> dict[str, Any]:
-    """Force the next run to re-derive anchors via the LLM bake-off.
+    """Force the next run to re-derive anchors via the selected LLM.
     Operationally: 'the page changed and the cached recipe is wrong.'"""
     with conn() as c, c.cursor() as cur:
         cur.execute(
@@ -229,8 +218,6 @@ async def trigger_run(source_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(e)) from e
 
 
-# ---------- Entities + history ----------
-
 @app.get("/sources/{source_id}/entities")
 def get_entities(source_id: int, limit: int = 100) -> list[dict[str, Any]]:
     with conn() as c, c.cursor() as cur:
@@ -246,8 +233,6 @@ def get_entities(source_id: int, limit: int = 100) -> list[dict[str, Any]]:
 
 @app.get("/sources/{source_id}/entities/{entity_id}/history")
 def entity_history(source_id: int, entity_id: int, limit: int = 200) -> dict[str, Any]:
-    """Per-entity change log: oldest first so the React sparkline can read
-    left-to-right without reversing."""
     with conn() as c, c.cursor() as cur:
         cur.execute(
             "SELECT identity, data FROM entities WHERE id = %s AND source_id = %s",
@@ -274,9 +259,6 @@ def entity_history(source_id: int, entity_id: int, limit: int = 200) -> dict[str
 
 @app.get("/sources/{source_id}/snapshot")
 def latest_snapshot(source_id: int, full: bool = False) -> dict[str, Any]:
-    """Return metadata about the most recent snapshot, plus a head/tail
-    preview of the HTML by default (full=True for the whole thing). Lets you
-    verify what the LLM and BS4 actually saw end-to-end without docker exec."""
     with conn() as c, c.cursor() as cur:
         cur.execute(
             "SELECT id, fetched_at, status_code, bytes, html "
@@ -303,114 +285,3 @@ def latest_snapshot(source_id: int, full: bool = False) -> dict[str, Any]:
         "truncated": not full,
     }
 
-
-# ---------- Per-entity policy alerts (Option A) ----------
-
-class AlertRuleIn(BaseModel):
-    name: str
-    entity_match: str | None = None  # NULL or '*' = match all entities
-    field: str
-    operator: str  # <, >, <=, >=, ==, !=, contains, !contains
-    threshold: str
-    enabled: bool = True
-
-
-@app.get("/sources/{source_id}/alert-rules")
-def list_alert_rules(source_id: int) -> list[dict[str, Any]]:
-    with conn() as c, c.cursor() as cur:
-        cur.execute(
-            "SELECT id, name, entity_match, field, operator, threshold, enabled, created_at "
-            "FROM entity_alert_rules WHERE source_id = %s ORDER BY id",
-            (source_id,),
-        )
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row, strict=False)) for row in cur.fetchall()]
-
-
-@app.post("/sources/{source_id}/alert-rules", status_code=201)
-def create_alert_rule(source_id: int, rule: AlertRuleIn) -> dict[str, Any]:
-    with conn() as c, c.cursor() as cur:
-        cur.execute(
-            "INSERT INTO entity_alert_rules "
-            "(source_id, name, entity_match, field, operator, threshold, enabled) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
-            (source_id, rule.name, rule.entity_match, rule.field,
-             rule.operator, rule.threshold, rule.enabled),
-        )
-        rid = cur.fetchone()[0]
-    return {"id": rid}
-
-
-@app.patch("/alert-rules/{rule_id}")
-def update_alert_rule(rule_id: int, patch: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"name", "entity_match", "field", "operator", "threshold", "enabled"}
-    fields = {k: v for k, v in patch.items() if k in allowed}
-    if not fields:
-        raise HTTPException(status_code=400, detail="empty patch")
-    sets = [f"{k} = %s" for k in fields.keys()]
-    vals = list(fields.values()) + [rule_id]
-    with conn() as c, c.cursor() as cur:
-        cur.execute(
-            f"UPDATE entity_alert_rules SET {', '.join(sets)} WHERE id = %s RETURNING id",
-            tuple(vals),
-        )
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="rule not found")
-    return {"id": rule_id, "updated": list(fields.keys())}
-
-
-@app.delete("/alert-rules/{rule_id}")
-def delete_alert_rule(rule_id: int) -> dict[str, Any]:
-    with conn() as c, c.cursor() as cur:
-        cur.execute("DELETE FROM entity_alert_rules WHERE id = %s RETURNING id", (rule_id,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="rule not found")
-    return {"id": rule_id, "deleted": True}
-
-
-@app.get("/sources/{source_id}/alerts")
-def list_recent_alerts(source_id: int, limit: int = 50) -> list[dict[str, Any]]:
-    """Recent fires from policy evaluation. Newest first."""
-    with conn() as c, c.cursor() as cur:
-        cur.execute(
-            "SELECT a.id, a.rule_id, r.name AS rule_name, a.entity_identity, "
-            "a.field, a.operator, a.threshold, a.field_value, a.fired_at "
-            "FROM entity_alerts a "
-            "LEFT JOIN entity_alert_rules r ON r.id = a.rule_id "
-            "WHERE a.source_id = %s ORDER BY a.fired_at DESC LIMIT %s",
-            (source_id, limit),
-        )
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row, strict=False)) for row in cur.fetchall()]
-
-
-@app.get("/sources/{source_id}/changes")
-def source_changes(source_id: int, limit: int = 200) -> list[dict[str, Any]]:
-    """Source-level change feed across all entities."""
-    with conn() as c, c.cursor() as cur:
-        cur.execute(
-            "SELECT c.id, c.entity_id, e.identity, c.field, c.old_value, c.new_value, c.changed_at "
-            "FROM entity_changes c LEFT JOIN entities e ON e.id = c.entity_id "
-            "WHERE c.source_id = %s ORDER BY c.changed_at DESC LIMIT %s",
-            (source_id, limit),
-        )
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row, strict=False)) for row in cur.fetchall()]
-
-
-# ---------- Runs ----------
-
-@app.get("/runs")
-def list_runs(limit: int = 50) -> list[dict[str, Any]]:
-    with conn() as c, c.cursor() as cur:
-        cur.execute(
-            "SELECT id, source_id, snapshot_id, started_at, finished_at, backend, "
-            "is_primary, confidence, entity_count, new_count, updated_count, "
-            "stale_count, cost_usd, agreement, error "
-            "FROM runs ORDER BY started_at DESC LIMIT %s",
-            (limit,),
-        )
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row, strict=False)) for row in cur.fetchall()]
