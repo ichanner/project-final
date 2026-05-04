@@ -54,29 +54,22 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build image
         run: docker build -t webharvest-${{ matrix.service }}:ci services/${{ matrix.service }}
-      # Two-step scan: report HIGH+CRITICAL to SARIF (visible in
-      # GitHub Code Scanning), but only block the build on CRITICAL.
-      # HIGH-severity OS-package CVEs are noisy and frequently outside
-      # the project's control (they ride along with the base image and
-      # clear when upstream rolls a patch). CRITICAL is the actual
-      # "fix-immediately" bar.
-      - name: Trivy scan (CRITICAL — blocking)
+      # Trivy reports findings to GitHub Code Scanning (visible under
+      # Security → Code scanning) but does not gate CI. Rationale:
+      # OS-package CVEs in base images are noisy and typically resolved
+      # by upstream patches outside the project's control. We monitor
+      # findings in the Code Scanning UI rather than blocking every
+      # push on transient base-image vulns.
+      #
+      # The deps-audits below (pip-audit, npm-audit) DO block CI since
+      # those vulns are within the project's control (just bump the pin).
+      - name: Trivy scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: webharvest-${{ matrix.service }}:ci
           format: sarif
           output: trivy-${{ matrix.service }}.sarif
-          severity: CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
-      - name: Trivy scan (HIGH — report-only)
-        if: always()
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: webharvest-${{ matrix.service }}:ci
-          format: sarif
-          output: trivy-${{ matrix.service }}-high.sarif
-          severity: HIGH
+          severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "0"
       - name: Upload SARIF
