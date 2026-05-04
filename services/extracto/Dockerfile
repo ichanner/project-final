@@ -2,7 +2,9 @@ FROM node:20-alpine AS base
 
 WORKDIR /app
 
-RUN apk add --no-cache curl tini && addgroup -S app && adduser -S app -G app
+RUN apk upgrade --no-cache \
+    && apk add --no-cache curl tini \
+    && addgroup -S app && adduser -S app -G app
 
 COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund
