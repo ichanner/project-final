@@ -225,7 +225,6 @@ function NewSourceForm({ onCreated }) {
   const [anchor, setAnchor] = useState("");
   const [fields, setFields] = useState([{ name: "title", type: "string", volatile: false }]);
   const [primary, setPrimary] = useState(ALL_MODELS[0]);
-  const [conditionalPolling, setConditionalPolling] = useState(true);
   const [cron, setCron] = useState("");
   const [showJson, setShowJson] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -233,16 +232,14 @@ function NewSourceForm({ onCreated }) {
   const loadPreset = (key) => {
     const p = PRESETS[key];
     setUrl(p.url); setLabel(p.label); setAnchor(p.anchor); setFields(p.fields); setCron(p.cron);
-    setConditionalPolling(true);
   };
 
   const payload = useMemo(() => ({
     url, label: label || null, anchor: anchor || null,
     schema: fieldsToSchema(fields),
     primary_model: primary,
-    conditional_polling: conditionalPolling,
     refresh_cron: cron || null,
-  }), [url, label, anchor, fields, primary, conditionalPolling, cron]);
+  }), [url, label, anchor, fields, primary, cron]);
 
   const submit = async (alsoRun) => {
     if (!url || !primary) return;
@@ -251,7 +248,6 @@ function NewSourceForm({ onCreated }) {
       const { id } = await createSource(payload);
       if (alsoRun) await triggerRun(id);
       setUrl(""); setLabel(""); setAnchor(""); setCron("");
-      setConditionalPolling(true);
       setFields([{ name: "title", type: "string", volatile: false }]);
       onCreated();
     } finally { setBusy(false); }
@@ -290,21 +286,6 @@ function NewSourceForm({ onCreated }) {
           </select>
           <div className="muted small" style={{ marginTop: 4, fontSize: 11 }}>
             called once per source on first-run / re-anchor
-          </div>
-        </div>
-        <div>
-          <div className="muted small" style={{ marginBottom: 4 }}>HTTP polling strategy</div>
-          <label className="role-toggle" style={{ width: 190, justifyContent: "flex-start" }}>
-            <input
-              type="checkbox"
-              checked={conditionalPolling}
-              onChange={(e) => setConditionalPolling(e.target.checked)}
-              title="send If-None-Match / If-Modified-Since when the source supports validators"
-            />
-            <span className="small">{conditionalPolling ? "conditional GET" : "naive GET"}</span>
-          </label>
-          <div className="muted small" style={{ marginTop: 4, fontSize: 11 }}>
-            compares 304 skips vs full downloads
           </div>
         </div>
         <div className="grow">
@@ -360,10 +341,6 @@ function RunFeedback({ result }) {
           <span className="muted"> · </span>
           <strong>{dur}ms</strong>
         </>}
-        {p.bytes_saved > 0 && <>
-          <span className="muted"> · </span>
-          <strong>{(p.bytes_saved / 1024).toFixed(1)} KB saved</strong>
-        </>}
       </span>
     </div>
   );
@@ -411,12 +388,6 @@ function Sources({ sources, onRun, onSelect, busyId, selectedId, onCronChange, o
               <div>
                 <span className="muted small">model</span>
                 <Badge kind="primary" title={s.primary_model}>{shortModel(s.primary_model)}</Badge>
-              </div>
-              <div>
-                <span className="muted small">http</span>
-                <Badge kind={s.conditional_polling ? "local" : "muted"} title={s.etag || s.last_modified || "no validator stored yet"}>
-                  {s.conditional_polling ? (s.etag || s.last_modified ? "conditional" : "conditional?") : "naive"}
-                </Badge>
               </div>
               <div>
                 <span className="muted small">fields</span>
@@ -723,7 +694,7 @@ export default function App() {
       <header>
         <div>
           <h1>WebHarvest</h1>
-          <span className="muted small">conditional HTTP polling · LLM-bootstrapped DOM anchors · field-level drift</span>
+          <span className="muted small">LLM-bootstrapped DOM anchors · BS4 fast-path · field-level drift</span>
         </div>
         <nav>
           <a href={`http://${window.location.hostname}:3001/d/webharvest`} target="_blank" rel="noreferrer">Grafana</a>

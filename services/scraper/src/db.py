@@ -26,18 +26,11 @@ def conn():
 
 
 def ensure_runtime_schema() -> None:
-    """Apply tiny additive migrations for long-lived local compose volumes.
+    """Hook for additive migrations on long-lived local compose volumes.
 
     `db/init.sql` only runs when the Postgres volume is first created. The
-    demo environment is often reused, so new nullable/defaulted columns need a
-    lightweight compatibility pass at service startup.
+    demo environment is often reused, so this is the place to apply tiny
+    nullable/defaulted column additions at service startup. Currently a no-op
+    — the schema in init.sql is the full picture.
     """
-    statements = [
-        "ALTER TABLE sources ADD COLUMN IF NOT EXISTS conditional_polling BOOLEAN NOT NULL DEFAULT TRUE",
-        "ALTER TABLE sources ADD COLUMN IF NOT EXISTS etag TEXT",
-        "ALTER TABLE sources ADD COLUMN IF NOT EXISTS last_modified TEXT",
-        "ALTER TABLE sources ADD COLUMN IF NOT EXISTS last_content_bytes INT",
-    ]
-    with conn() as c, c.cursor() as cur:
-        for stmt in statements:
-            cur.execute(stmt)
+    return

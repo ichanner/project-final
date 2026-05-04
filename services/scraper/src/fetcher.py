@@ -29,11 +29,9 @@ from dataclasses import dataclass
 import httpx
 
 from .metrics import (
-    fetch_bytes_total,
     fetch_consecutive_failures,
     fetch_errors_total,
     fetch_redirect_count,
-    fetch_requests_total,
     fetch_response_size_bytes,
     fetch_status_total,
     fetch_total,
@@ -80,12 +78,8 @@ _consecutive_failures: dict[str, int] = {}
 @dataclass(frozen=True)
 class FetchResult:
     status_code: int
-    html: str | None
+    html: str
     bytes_downloaded: int
-    etag: str | None = None
-    last_modified: str | None = None
-    mode: str = "naive"
-    result: str = "modified"
 
 
 class FetchError(Exception):
@@ -141,14 +135,8 @@ def _record_success(sid: str) -> None:
 async def fetch(
     url: str,
     source_id: int | str | None = None,
-    *,
-    etag: str | None = None,
-    last_modified: str | None = None,
-    conditional: bool = False,
 ) -> FetchResult:
-    """Fetch a URL and classify the polling strategy result.
-
-    Returns a FetchResult. `html` is None only for HTTP 304 Not Modified.
+    """Fetch a URL and return the response body or raise a classified error.
 
     Raises FetchError on transport failure (timeout/dns/etc), HTTP 4xx/5xx,
     or detected anti-bot interstitial. The error's `error_class` attribute
@@ -159,13 +147,7 @@ async def fetch(
     accurate.
     """
     sid = str(source_id) if source_id is not None else "unknown"
-    mode = "conditional" if conditional and (etag or last_modified) else "naive"
     headers = dict(DEFAULT_HEADERS)
-    if mode == "conditional":
-        if etag:
-            headers["If-None-Match"] = etag
-        if last_modified:
-            headers["If-Modified-Since"] = last_modified
 
     try:
         async with httpx.AsyncClient(
@@ -178,7 +160,6 @@ async def fetch(
         error_class = _classify_transport_error(e)
         fetch_status_total.labels(source_id=sid, status_code="0").inc()
         fetch_total.labels(source_id=sid, outcome="error").inc()
-        fetch_requests_total.labels(source_id=sid, mode=mode, result="error").inc()
         consecutive = _record_failure(sid, error_class)
         raise FetchError(
             error_class,
@@ -192,28 +173,9 @@ async def fetch(
     fetch_response_size_bytes.labels(source_id=sid).observe(bytes_downloaded)
     fetch_redirect_count.labels(source_id=sid).observe(len(resp.history))
 
-    if status == 304:
-        fetch_total.labels(source_id=sid, outcome="ok").inc()
-        fetch_requests_total.labels(
-            source_id=sid, mode=mode, result="not_modified",
-        ).inc()
-        fetch_bytes_total.labels(source_id=sid, mode=mode).inc(0)
-        _record_success(sid)
-        return FetchResult(
-            status_code=status,
-            html=None,
-            bytes_downloaded=0,
-            etag=resp.headers.get("etag") or etag,
-            last_modified=resp.headers.get("last-modified") or last_modified,
-            mode=mode,
-            result="not_modified",
-        )
-
     if status >= 400:
         error_class = "http_4xx" if status < 500 else "http_5xx"
         fetch_total.labels(source_id=sid, outcome="error").inc()
-        fetch_requests_total.labels(source_id=sid, mode=mode, result="error").inc()
-        fetch_bytes_total.labels(source_id=sid, mode=mode).inc(bytes_downloaded)
         consecutive = _record_failure(sid, error_class)
         raise FetchError(
             error_class,
@@ -223,8 +185,6 @@ async def fetch(
 
     if _looks_like_anti_bot(html):
         fetch_total.labels(source_id=sid, outcome="error").inc()
-        fetch_requests_total.labels(source_id=sid, mode=mode, result="error").inc()
-        fetch_bytes_total.labels(source_id=sid, mode=mode).inc(bytes_downloaded)
         consecutive = _record_failure(sid, "anti_bot")
         raise FetchError(
             "anti_bot",
@@ -236,18 +196,9 @@ async def fetch(
     if "\x00" in html:
         html = html.replace("\x00", "")
     fetch_total.labels(source_id=sid, outcome="ok").inc()
-    new_etag = resp.headers.get("etag")
-    new_last_modified = resp.headers.get("last-modified")
-    result = "modified" if (not conditional or new_etag or new_last_modified) else "unsupported"
-    fetch_requests_total.labels(source_id=sid, mode=mode, result=result).inc()
-    fetch_bytes_total.labels(source_id=sid, mode=mode).inc(bytes_downloaded)
     _record_success(sid)
     return FetchResult(
         status_code=status,
         html=html,
         bytes_downloaded=bytes_downloaded,
-        etag=new_etag,
-        last_modified=new_last_modified,
-        mode=mode,
-        result=result,
     )

@@ -37,7 +37,6 @@ class SourceIn(BaseModel):
     anchor: str | None = None
     identity_key: list[str] = Field(default_factory=list)
     refresh_cron: str | None = None
-    conditional_polling: bool = True
     primary_model: str | None = None
 
     model_config = {"populate_by_name": True, "protected_namespaces": ()}
@@ -47,7 +46,6 @@ class SourcePatch(BaseModel):
     """Partial update — only fields present on the body are touched."""
     label: str | None = None
     refresh_cron: str | None = None
-    conditional_polling: bool | None = None
     primary_model: str | None = None
     anchor: str | None = None
     schema_: dict[str, Any] | None = Field(default=None, alias="schema")
@@ -81,8 +79,7 @@ def list_sources() -> list[dict[str, Any]]:
     with conn() as c, c.cursor() as cur:
         cur.execute(
             "SELECT s.id, s.url, s.label, s.schema, s.anchor, s.identity_key, "
-            "s.refresh_cron, s.conditional_polling, s.etag, s.last_modified, "
-            "s.last_content_bytes, s.primary_model, "
+            "s.refresh_cron, s.primary_model, "
             "s.last_anchored_at, "
             "(s.anchors IS NOT NULL) AS has_anchors, "
             "s.created_at, "
@@ -104,13 +101,11 @@ def create_source(src: SourceIn) -> dict[str, Any]:
     with conn() as c, c.cursor() as cur:
         cur.execute(
             "INSERT INTO sources "
-            "(url, label, schema, anchor, identity_key, refresh_cron, conditional_polling, "
-            " primary_model) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+            "(url, label, schema, anchor, identity_key, refresh_cron, primary_model) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (url) DO UPDATE SET label = EXCLUDED.label, "
             "schema = EXCLUDED.schema, anchor = EXCLUDED.anchor, "
             "identity_key = EXCLUDED.identity_key, refresh_cron = EXCLUDED.refresh_cron, "
-            "conditional_polling = EXCLUDED.conditional_polling, "
             "primary_model = EXCLUDED.primary_model, "
             "updated_at = now() RETURNING id",
             (
@@ -120,7 +115,6 @@ def create_source(src: SourceIn) -> dict[str, Any]:
                 src.anchor,
                 src.identity_key,
                 src.refresh_cron,
-                src.conditional_polling,
                 src.primary_model,
             ),
         )

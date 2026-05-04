@@ -1,25 +1,37 @@
-from src.metrics import fetch_requests_total, fetch_total, run_entities
+from src.metrics import (
+    fast_path_total,
+    fetch_errors_total,
+    fetch_total,
+    poll_total,
+    run_entities,
+)
 
 
 def test_metrics_have_expected_labels():
     fetch_total.labels(source_id="1", outcome="ok").inc()
-    fetch_requests_total.labels(
-        source_id="1", mode="conditional", result="not_modified",
-    ).inc()
+    fetch_errors_total.labels(source_id="1", error_class="timeout").inc()
+    poll_total.labels(source_id="1", path="dom_fast_path").inc()
+    fast_path_total.labels(source_id="1", outcome="hit").inc()
     run_entities.labels(source_id="1", change="new").inc(3)
 
-    samples = list(fetch_total.collect())
-    assert samples, "fetch_total should expose samples"
+    fetch_samples = list(fetch_total.collect())
+    assert fetch_samples, "fetch_total should expose samples"
     assert any(
         s.labels.get("source_id") == "1" and s.labels.get("outcome") == "ok"
-        for fam in samples
+        for fam in fetch_samples
         for s in fam.samples
     )
 
-    conditional_samples = list(fetch_requests_total.collect())
+    poll_samples = list(poll_total.collect())
     assert any(
-        s.labels.get("mode") == "conditional"
-        and s.labels.get("result") == "not_modified"
-        for fam in conditional_samples
+        s.labels.get("path") == "dom_fast_path"
+        for fam in poll_samples
+        for s in fam.samples
+    )
+
+    error_samples = list(fetch_errors_total.collect())
+    assert any(
+        s.labels.get("error_class") == "timeout"
+        for fam in error_samples
         for s in fam.samples
     )

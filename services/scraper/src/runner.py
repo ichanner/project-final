@@ -1,23 +1,21 @@
-"""Conditional-fetch first, cached-anchor second, LLM anchoring only on demand.
+"""Cached-anchor BS4 first, LLM anchoring only on first run or operator demand.
 
-Architecture (the cost story):
+Architecture:
 
   Each Run on a source:
-    1. Fetch HTML. If the source has validators, send If-None-Match /
-       If-Modified-Since. A 304 inserts a run row and skips extraction.
+    1. Fetch the page HTML.
     2. If source.anchors is set:
          - Apply via BeautifulSoup (~50ms, $0).
-         - Verify result quality against the LLM's verification probe.
-         - If valid: insert a single fast-path run row, diff, persist. DONE.
+         - Insert a fast-path run row, diff against stored entities, persist.
        If anchors are missing:
          - Call the selected LLM once to create an anchor recipe + bootstrap
            entity sample. Cache the recipe; future cron polls use BS4 only.
 
-Steady state polls cost zero LLM tokens. Conditional 304 polls skip even BS4.
+Steady-state polls cost zero LLM tokens. The unique angle is that the LLM
+output (a CSS-selector recipe) is itself the cached artifact — not the model.
 
-This module emits the THESIS-CRITICAL metrics: anchor_age, anchor_extraction_count,
-anchor_field_population_ratio, anchor_phantom_update_ratio, cost_saved_usd_total.
-Fetch-side metrics live entirely in fetcher.py to keep the metric story per-file.
+Fetch-side metrics live entirely in fetcher.py to keep the metric story
+per-file. This module emits poll-, anchor-, and diff-side metrics.
 """
 
 from __future__ import annotations
@@ -25,7 +23,6 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -36,16 +33,10 @@ from .diff import identity_for
 from .dom_extractor import apply_anchors, verify_anchors
 from .fetcher import fetch
 from .metrics import (
-    anchor_age_seconds,
     anchor_extraction_count,
-    anchor_field_population_ratio,
-    anchor_phantom_update_ratio,
     anchor_re_anchor_total,
-    cost_saved_usd_total,
-    extractions_skipped_total,
     fast_path_duration,
     fast_path_total,
-    fetch_bytes_saved_total,
     fetch_duration,
     fetch_total,
     field_changes_total,
@@ -54,7 +45,6 @@ from .metrics import (
     run_cost_usd,
     run_entities,
 )
-from .pricing import estimate_extraction_cost
 
 log = logging.getLogger("scraper.runner")
 
@@ -137,7 +127,7 @@ def _diff_and_persist(
 ) -> tuple[int, int, int]:
     """Apply primary entities to the entities table.
 
-    Two big changes vs. naive diffing:
+    Two non-obvious behaviors:
     1. Anchor-field differences are SILENTLY merged (treated as extraction
        noise, e.g. whitespace, footnote markers, BS4 binding flicker). They
        never contribute to updated_count and never write entity_changes.
@@ -226,9 +216,6 @@ def _diff_and_persist(
     if stale_count > 0:
         run_entities.labels(source_id=sid_label, change="stale").inc(stale_count)
 
-    total_rows = len(entities) or 1
-    anchor_phantom_update_ratio.labels(source_id=sid_label).set(rejected_count / total_rows)
-
     if rejected_count:
         log.info(
             "src=%s rejected %s rows for anchor-field mismatch (extractor bound to wrong DOM row)",
@@ -242,11 +229,6 @@ async def _fetch_and_snapshot(
     source_id: int,
     url: str,
     sid_label: str,
-    *,
-    conditional_polling: bool,
-    etag: str | None,
-    last_modified: str | None,
-    last_content_bytes: int | None,
 ) -> dict[str, Any]:
     """Returns fetch/snapshot metadata or an error-marker dict on failure.
 
@@ -257,13 +239,7 @@ async def _fetch_and_snapshot(
     """
     t0 = time.monotonic()
     try:
-        result = await fetch(
-            url,
-            source_id,
-            conditional=conditional_polling,
-            etag=etag,
-            last_modified=last_modified,
-        )
+        result = await fetch(url, source_id)
     except Exception as e:
         with conn() as c, c.cursor() as cur:
             cur.execute(
@@ -277,27 +253,7 @@ async def _fetch_and_snapshot(
     finally:
         fetch_duration.labels(source_id=sid_label).observe(time.monotonic() - t0)
 
-    if result.status_code == 304:
-        saved = max(int(last_content_bytes or 0), 0)
-        if saved:
-            fetch_bytes_saved_total.labels(source_id=sid_label).inc(saved)
-        with conn() as c, c.cursor() as cur:
-            cur.execute(
-                "UPDATE sources SET etag = COALESCE(%s, etag), "
-                "last_modified = COALESCE(%s, last_modified), updated_at = now() "
-                "WHERE id = %s",
-                (result.etag, result.last_modified, source_id),
-            )
-        return {
-            "status": result.status_code,
-            "html": None,
-            "snapshot_id": None,
-            "not_modified": True,
-            "bytes_saved": saved,
-            "fetch_mode": result.mode,
-        }
-
-    html = result.html or ""
+    html = result.html
     with conn() as c, c.cursor() as cur:
         cur.execute(
             "INSERT INTO snapshots (source_id, status_code, html, bytes) "
@@ -305,20 +261,11 @@ async def _fetch_and_snapshot(
             (source_id, result.status_code, html, len(html)),
         )
         snapshot_id = cur.fetchone()[0]
-        cur.execute(
-            "UPDATE sources SET etag = %s, last_modified = %s, "
-            "last_content_bytes = %s, updated_at = now() WHERE id = %s",
-            (result.etag, result.last_modified, result.bytes_downloaded, source_id),
-        )
 
     return {
         "status": result.status_code,
         "html": html,
         "snapshot_id": snapshot_id,
-        "not_modified": False,
-        "bytes_saved": 0,
-        "fetch_mode": result.mode,
-        "fetch_result": result.result,
     }
 
 
@@ -337,8 +284,7 @@ async def run_source(source_id: int) -> dict[str, Any]:
         with conn() as c, c.cursor() as cur:
             cur.execute(
                 "SELECT url, schema, anchor, identity_key, primary_model, "
-                "anchors, last_anchored_at, "
-                "conditional_polling, etag, last_modified, last_content_bytes "
+                "anchors, last_anchored_at "
                 "FROM sources WHERE id = %s",
                 (source_id,),
             )
@@ -348,12 +294,7 @@ async def run_source(source_id: int) -> dict[str, Any]:
             (
                 url, schema, anchor, identity_key, primary_model,
                 cached_anchors, last_anchored_at,
-                conditional_polling, etag, last_modified, last_content_bytes,
             ) = row
-
-        if last_anchored_at:
-            age = (datetime.now(UTC) - last_anchored_at).total_seconds()
-            anchor_age_seconds.labels(source_id=sid_label).set(max(0.0, age))
 
         schema = schema or {}
         schema_fields = _schema_field_names(schema)
@@ -371,61 +312,12 @@ async def run_source(source_id: int) -> dict[str, Any]:
             fast_path_total.labels(source_id=sid_label, outcome=outcome).inc(0)
         for outcome in ("ok", "error"):
             fetch_total.labels(source_id=sid_label, outcome=outcome).inc(0)
-        for path in ("conditional_skip", "dom_fast_path", "llm_anchor"):
+        for path in ("dom_fast_path", "llm_anchor"):
             poll_total.labels(source_id=sid_label, path=path).inc(0)
 
-        fetched = await _fetch_and_snapshot(
-            source_id,
-            url,
-            sid_label,
-            conditional_polling=bool(conditional_polling) and bool(cached_anchors),
-            etag=etag,
-            last_modified=last_modified,
-            last_content_bytes=last_content_bytes,
-        )
+        fetched = await _fetch_and_snapshot(source_id, url, sid_label)
         if isinstance(fetched, dict) and "_error" in fetched:
             return {"run_id": fetched["_error_run_id"], "error": fetched["_error"]}
-
-        if fetched.get("not_modified"):
-            poll_total.labels(source_id=sid_label, path="conditional_skip").inc()
-            extractions_skipped_total.labels(
-                source_id=sid_label, reason="http_304",
-            ).inc()
-            with conn() as c, c.cursor() as cur:
-                cur.execute(
-                    "SELECT count(*) FROM entities WHERE source_id = %s AND stale = FALSE",
-                    (source_id,),
-                )
-                entity_count = cur.fetchone()[0]
-                cur.execute(
-                    "INSERT INTO runs "
-                    "(source_id, started_at, finished_at, backend, is_primary, "
-                    " confidence, entity_count, cost_usd, error) "
-                    "VALUES (%s, now(), now(), %s, TRUE, 1.0, %s, 0, NULL) "
-                    "RETURNING id",
-                    (source_id, "conditional-304", entity_count),
-                )
-                run_id = cur.fetchone()[0]
-                cur.execute(
-                    "UPDATE entities SET last_seen = now(), last_run_id = %s, "
-                    "stale = FALSE WHERE source_id = %s AND stale = FALSE",
-                    (run_id, source_id),
-                )
-            return {
-                "snapshot_id": None, "source_id": source_id,
-                "primary_model": "conditional-304",
-                "models_run": ["conditional-304"],
-                "primary": {
-                    "run_id": run_id, "entity_count": entity_count,
-                    "new": 0, "updated": 0, "stale": 0,
-                    "cost_usd": 0.0, "confidence": 1.0,
-                    "anchors_persisted": bool(cached_anchors),
-                    "source": "http-304",
-                    "error": None,
-                    "bytes_saved": fetched.get("bytes_saved", 0),
-                },
-                "fast_path": {"hit": True, "skipped": True, "reason": "http_304"},
-            }
 
         html = fetched["html"]
         snapshot_id = fetched["snapshot_id"]
@@ -441,21 +333,6 @@ async def run_source(source_id: int) -> dict[str, Any]:
             fast_path_total.labels(source_id=sid_label, outcome=outcome).inc()
 
             anchor_extraction_count.labels(source_id=sid_label).set(len(entities))
-
-            if entities and schema_fields:
-                n = len(entities)
-                for fname in schema_fields:
-                    populated = sum(
-                        1 for e in entities
-                        if e.get(fname) is not None and str(e.get(fname)).strip()
-                    )
-                    anchor_field_population_ratio.labels(
-                        source_id=sid_label, field=fname,
-                    ).set(populated / n)
-
-            if outcome == "hit" and primary_model:
-                saved = estimate_extraction_cost(len(html), primary_model)
-                cost_saved_usd_total.labels(source_id=sid_label).inc(saved)
 
             confidence = float(cached_anchors.get("confidence", 0.95))
             err = None if entities else (
@@ -573,9 +450,6 @@ async def run_source(source_id: int) -> dict[str, Any]:
                     "WHERE id = %s",
                     (new_count, updated_count, stale_count, primary_run_id),
                 )
-
-        if anchors:
-            anchor_age_seconds.labels(source_id=sid_label).set(0)
 
         return {
             "snapshot_id": snapshot_id, "source_id": source_id,

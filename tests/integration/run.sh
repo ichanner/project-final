@@ -20,8 +20,7 @@ run_fixture() {
       \"label\": \"$label\",
       \"identity_key\": $identity_key,
       \"schema\": {},
-      \"primary_model\": \"$PRIMARY\",
-      \"conditional_polling\": true
+      \"primary_model\": \"$PRIMARY\"
     }")
   echo "$create_resp"
   local source_id
