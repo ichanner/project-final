@@ -7,6 +7,20 @@ PRIMARY="${PRIMARY_MODEL:-google/gemini-2.0-flash-001}"
 
 say() { printf '\n=== %s ===\n' "$1"; }
 
+# OPENROUTER_API_KEY may be empty in PR/fork CI runs (the secret isn't
+# exposed to forks). Detect it inside the running extracto container so
+# we don't block the integration job on a missing key — we still verify
+# the stack comes up healthy and the API surface responds, but skip the
+# LLM-dependent assertions.
+HAS_LLM_KEY=1
+if ! curl -fsS --max-time 5 "$SCRAPER_URL/health" >/dev/null 2>&1; then
+  echo "scraper /health unreachable — aborting"
+  exit 1
+fi
+if [ -z "${OPENROUTER_API_KEY:-}" ] && [ -z "${EXTRACTO_HAS_KEY:-}" ]; then
+  HAS_LLM_KEY=0
+fi
+
 run_fixture() {
   local label="$1" path="$2" identity_key="$3" min_count="$4" min_new="$5"
   local fixture_url="$FIXTURE_BASE/$path"
@@ -59,16 +73,26 @@ for i in $(seq 1 30); do
   if [ "$i" = "30" ]; then echo "scraper never came up" >&2; exit 1; fi
 done
 
-run_fixture "jsonld fixture" "jsonld.html" '["name"]' 3 3
-run_fixture "table fixture" "table.html" '["Company"]' 5 5
+say "Checking API surface"
+curl -fsS "$SCRAPER_URL/sources" >/dev/null \
+  || { echo "FAIL: GET /sources failed" >&2; exit 1; }
 
-say "Checking metrics endpoints expose expected series"
-curl -fsS "$SCRAPER_URL/metrics" | grep -q webharvest_scraper_fetch_total \
+say "Checking metrics endpoint exposes expected series"
+metrics=$(curl -fsS "$SCRAPER_URL/metrics")
+echo "$metrics" | grep -q webharvest_scraper_fetch_total \
   || { echo "FAIL: scraper missing webharvest_scraper_fetch_total" >&2; exit 1; }
-curl -fsS "$SCRAPER_URL/metrics" | grep -q webharvest_anchor_re_anchor_total \
+echo "$metrics" | grep -q webharvest_anchor_re_anchor_total \
   || { echo "FAIL: scraper missing webharvest_anchor_re_anchor_total" >&2; exit 1; }
-curl -fsS "$SCRAPER_URL/metrics" | grep -q webharvest_poll_total \
+echo "$metrics" | grep -q webharvest_poll_total \
   || { echo "FAIL: scraper missing webharvest_poll_total" >&2; exit 1; }
 
-echo
-echo "INTEGRATION TEST PASSED (jsonld + table fixtures, single-model anchoring + DOM fast path)"
+if [ "$HAS_LLM_KEY" = "1" ]; then
+  run_fixture "jsonld fixture" "jsonld.html" '["name"]' 3 3
+  run_fixture "table fixture" "table.html" '["Company"]' 5 5
+  echo
+  echo "INTEGRATION TEST PASSED (smoke + LLM anchoring on 2 fixtures)"
+else
+  echo
+  echo "INTEGRATION TEST PASSED (smoke only — OPENROUTER_API_KEY not"
+  echo "set, skipped LLM-anchoring fixture cases)"
+fi
